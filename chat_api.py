@@ -10,9 +10,9 @@ from cryptography.hazmat.primitives import hashes
 
 class Peer:
     def __init__(self, host, port):
-        self.host = host
-        self.port = port
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.host = host    # Iniciar o host
+        self.port = port    # Iniciar o porto
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)    # SOCKET TCP 
         self.connections = {}  # Armazenar conexões ativas
         self.keys = self.generate_keys()  # Chaves do cliente
 
