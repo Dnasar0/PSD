@@ -20,27 +20,35 @@ class Peer:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)  # TCP SOCKET
         self.connections = {}  # Store active connections
         self.folder_path = str(self.host) +"_"+ str(self.port)
+        
         if not os.path.exists(self.folder_path):
             os.mkdir(self.folder_path)
             print(f"Folder '{self.folder_path}' created.")
 
     def connect(self, host, port, name):
         """Connect to a peer."""
+        
         try:
             connection = socket.create_connection((host, port))
             self.connections[name] = {
                 'socket': connection,
                 'address': (host, port)  # Store address properly
             }
+            
             print(f"Connected to {name} at {host}:{port}")
+            
             threading.Thread(target=self.handle_client, args=(connection, name)).start()
+            
             # Cria historico das conversas
             historicConversation = self.folder_path + "/" + str(host) +"_"+ str(port) + ".txt"
+            
             if not os.path.exists(historicConversation):
                 open(historicConversation, "x")
                 print(f"File '{historicConversation}' created.")
+                
             #Cria lista de contatos
             contactsListPath = self.folder_path + "/" + self.contactsListFile
+            
             if not os.path.exists(contactsListPath):
                 open(contactsListPath, "a").write(str(host) +"_"+ str(port) + "-" + name + "\n")
                 
@@ -49,8 +57,10 @@ class Peer:
 
     def listen(self):
         """Listen for incoming connections."""
+        
         self.socket.bind((self.host, self.port))
         print(self.socket)
+        
         self.socket.listen(10)
         print(f"Listening for connections on {self.host}:{self.port}")
 
@@ -58,8 +68,10 @@ class Peer:
             try:
                 connection, address = self.socket.accept()
                 print(connection)
+                
                 name = f"{address[0]}:{address[1]}"
                 self.connections[name] = {'socket': connection}
+                
                 threading.Thread(target=self.handle_client, args=(connection, name)).start()
             except OSError as e:
                 print(f"Socket error: {e}")
@@ -85,10 +97,13 @@ class Peer:
         """Handle incoming messages from a client."""
         while True:
             try:
+                
                 data = connection.recv(1024) #Recebe mensagem
+                
                 if not data:
                     break
                 message = data.decode()
+                
                 if message.startswith("MSG:"):
                     host_port=connection.recv(1024).decode() #Recebe host e port
                     host_port = host_port[4:] #Remove o prefixo "MSG:"
@@ -115,6 +130,7 @@ class Peer:
                     }
                     print(self.connections)
                     print(f"Connected to {name} at {host}:{port}")
+                    
 ##################### Cliente que enviou mesagem recebe a confirmação e regista no historico da conversa ###################################################################
                 if message.startswith("ACK"):
                     print(self.message)
