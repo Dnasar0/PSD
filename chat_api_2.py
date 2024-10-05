@@ -43,6 +43,7 @@ class Peer:
             contactsListPath = self.folder_path + "/" + self.contactsListFile
             if not os.path.exists(contactsListPath):
                 open(contactsListPath, "a").write(str(host) +"_"+ str(port) + "-" + name + "\n")
+                
         except socket.error as e:
             print(f"Failed to connect to {host}:{port}. Error: {e}")
 
@@ -68,7 +69,6 @@ class Peer:
         """Send plaintext data."""
         try:
             self.message = message
-            
             connection_info = self.connections[name]
             
             self.hostToMsg, self.portToMsg = connection_info.get('address')
@@ -86,7 +86,6 @@ class Peer:
         while True:
             try:
                 data = connection.recv(1024) #Recebe mensagem
-                #Verificar se o ficheiro host_port.txt existe...
                 if not data:
                     break
                 message = data.decode()
@@ -114,6 +113,7 @@ class Peer:
                         'socket': connection,
                         'address': (host, port)  # Store address properly
                     }
+                    print(self.connections)
                     print(f"Connected to {name} at {host}:{port}")
 ##################### Cliente que enviou mesagem recebe a confirmação e regista no historico da conversa ###################################################################
                 if message.startswith("ACK"):
@@ -235,9 +235,79 @@ class P2PChatApp(tk.Tk):
 
         self.start_chat_button = tk.Button(self.main_frame, text="Start Chat", command=self.start_chat)
         self.start_chat_button.pack(pady=10)
+        
+        self.edit_name_button = tk.Button(self.main_frame, text="Edit Contact Name", command=self.edit_client_name)
+        self.edit_name_button.pack(pady=10)
 
         self.back_button = tk.Button(self.main_frame, text="Back", command=self.create_menu)
         self.back_button.pack()
+
+    def edit_client_name(self):
+        """Edit the name of the selected client."""
+        selected_client = self.client_listbox.curselection()
+        if selected_client:
+            client_name = self.client_listbox.get(selected_client)
+
+            # Abrir uma nova janela para edição
+            edit_window = tk.Toplevel(self)
+            edit_window.title(f"Edit Name of {client_name}")
+            edit_window.geometry("300x150")
+
+            tk.Label(edit_window, text="Enter new name:").pack(pady=10)
+            new_name_entry = tk.Entry(edit_window)
+            new_name_entry.pack(pady=5, padx=20)
+
+            def save_new_name():
+                new_name = new_name_entry.get()
+                if new_name:
+                    # Obtenha o IP e Porta do cliente selecionado
+                    client_info = self.peer.connections[client_name]
+                    host, port = client_info['address']
+
+                    # Caminho para o ficheiro contacts.txt
+                    contacts_list_path = os.path.join(self.peer.folder_path, self.peer.contactsListFile)
+                    contactsListPath = self.peer.folder_path + "/" + self.peer.contactsListFile
+                    if os.path.exists(contactsListPath):
+                        with open(contactsListPath, "r") as file:
+                            lines = file.readlines()
+
+                        # Procurar e modificar a linha correspondente ao contato
+                        updated_lines = []
+                        for line in lines:
+                            print(line)
+                            contact_ip_port, contact_name = line.strip().split('-')
+                            print(contact_ip_port)
+                            print(contact_name)
+                            if contact_ip_port == f"{host}_{port}":
+                                # Substituir pelo novo nome
+                                updated_lines.append(f"{contact_ip_port}-{new_name}\n")
+                            else:
+                                updated_lines.append(line)
+
+                        # Reescrever o ficheiro com o nome atualizado
+                        with open(contactsListPath, 'w') as file:
+                            file.writelines(updated_lines)
+
+                        print(self.peer.connections)
+                        # Atualizar o nome na lista de conexões (dicionário interno)
+                        connection_data  = self.peer.connections.pop(client_name)
+                        self.peer.connections[new_name] = connection_data
+                        print(self.peer.connections)
+                        # Atualizar a listbox de clientes
+                        self.load_clients()
+
+                        messagebox.showinfo("Success", f"Contact name updated to {new_name}")
+                        edit_window.destroy()
+                    else:
+                        messagebox.showerror("Error", "Contacts file not found.")
+                else:
+                    messagebox.showwarning("Invalid Input", "Please enter a valid name.")
+
+            tk.Button(edit_window, text="Save", command=save_new_name).pack(pady=10)
+
+        else:
+            messagebox.showwarning("Invalid Selection", "Please select a client to edit the name.")
+
 
     def load_clients(self):
         """Load the list of connected clients."""
