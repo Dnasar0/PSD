@@ -98,7 +98,7 @@ class Peer:
                     print(f"\nReceived data from {host + ":" + port}: {message}")
 
 
-                    open(self.folder_path + "/" + str(host) +"_"+ str(port) + ".txt", "a").write(host + ":" + port + "-" + message + "\n")
+                    open(self.folder_path + "/" + str(host) +"_"+ str(port) + ".txt", "a").write(host + ":" + port + "- " + message + "\n")
                     contactsListPath = self.folder_path + "/" + self.contactsListFile
                     if not os.path.exists(contactsListPath):
                         open(contactsListPath, "a").write(str(host) +"_"+ str(port) + "-" + str(host) +":"+ str(port) + "\n")
@@ -119,7 +119,7 @@ class Peer:
                 if message.startswith("ACK"):
                     print(self.message)
                     print(f"Message to {name} delivered successfully.")
-                    open(self.folder_path + "/" + str(self.hostToMsg) +"_"+ str(self.portToMsg) + ".txt", "a").write("You-" + self.message + "\n")
+                    open(self.folder_path + "/" + str(self.hostToMsg) +"_"+ str(self.portToMsg) + ".txt", "a").write("You- " + self.message + "\n")
 
             except socket.error as e:
                 print(f"Socket error: {e}")
@@ -231,7 +231,9 @@ class P2PChatApp(tk.Tk):
         self.client_listbox = tk.Listbox(self.main_frame)
         self.client_listbox.pack(fill=tk.BOTH, expand=True, padx=10)
 
-        self.load_clients()
+        #self.load_clients()
+        # Carregar a lista de contactos do ficheiro
+        self.load_contact_list()
 
         self.start_chat_button = tk.Button(self.main_frame, text="Start Chat", command=self.start_chat)
         self.start_chat_button.pack(pady=10)
@@ -309,6 +311,22 @@ class P2PChatApp(tk.Tk):
             messagebox.showwarning("Invalid Selection", "Please select a client to edit the name.")
 
 
+    def load_contact_list(self):
+        """Carregar a lista de contactos do ficheiro contacts.txt e exibir na listbox."""
+        contacts_list_path = os.path.join(self.peer.folder_path, self.peer.contactsListFile)
+
+        if os.path.exists(contacts_list_path):
+            with open(contacts_list_path, 'r') as file:
+                contacts = file.readlines()
+
+            # Adicionar os contactos à listbox
+            for contact in contacts:
+                contact = contact.strip().split('-')[-1]  # Remover quebras de linha
+                self.client_listbox.insert(tk.END, contact)
+        else:
+            messagebox.showinfo("Info", "No contacts found.")
+
+
     def load_clients(self):
         """Load the list of connected clients."""
         self.client_listbox.delete(0, tk.END)
@@ -319,7 +337,32 @@ class P2PChatApp(tk.Tk):
         selected_client = self.client_listbox.curselection()
         if selected_client:
             client_name = self.client_listbox.get(selected_client)
-            self.chat_window = ChatWindow(self.peer, client_name)
+            
+            # Carregar histórico da conversa do cliente
+            client_info = self.peer.connections.get(client_name)
+            if client_info:
+                host, port = client_info['address']
+                file_path = os.path.join(self.peer.folder_path, f"{host}_{port}.txt")
+
+                self.chat_window = ChatWindow(self.peer, client_name, file_path)
+            else:
+                host_port= None
+                #Abrir lista de contactos
+                contacts_list_path = os.path.join(self.peer.folder_path, self.peer.contactsListFile)
+                if os.path.exists(contacts_list_path):
+                    with open(contacts_list_path, 'r') as file:
+                        contacts = file.readlines()
+
+                    # Encontrar ip:port correspondente a client_name
+                    for contact in contacts:
+                        if contact.strip().split('-')[-1] == client_name: #Verifica se o nome do contato corresponde ao selecionado
+                            host_port = contact.strip().split('-')[0] #Obtemm o ip:port do contato
+                            host, port = host_port.split(':')
+                            self.peer.connect(host, port, client_name) #Conecta-se ao contato
+                            break
+                self.chat_window = ChatWindow(self.peer, client_name, file_path)
+            
+            #self.chat_window = ChatWindow(self.peer, client_name, None)
         else:
             messagebox.showwarning("Invalid Selection", "Please select a client to start the chat.")
 
@@ -330,10 +373,13 @@ class P2PChatApp(tk.Tk):
 
 
 class ChatWindow(tk.Toplevel):
-    def __init__(self, peer, client_name):
+    def __init__(self, peer, client_name, file_path):
         super().__init__()
         self.peer = peer
         self.client_name = client_name
+        
+        self.file_path = file_path  # Caminho do arquivo de histórico
+        
         self.title(f"Chat with {client_name}")
         self.geometry("400x400")
         self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -347,17 +393,31 @@ class ChatWindow(tk.Toplevel):
 
         self.send_button = tk.Button(self, text="Send", command=self.send_message)
         self.send_button.pack(side=tk.RIGHT)
+        
+        # Carregar o histórico do arquivo e exibi-lo na janela
+        self.load_chat_history()
 
         # Start listening for messages in a separate thread
         self.listen_thread = threading.Thread(target=self.listen_for_messages, daemon=True)
         self.listen_thread.start()
+        
+    def load_chat_history(self):
+        """Carregar histórico de mensagens do arquivo e exibir."""
+        if os.path.exists(self.file_path):
+            with open(self.file_path, 'r') as file:
+                history = file.read()
+            if history:
+                self.chat_display.configure(state=tk.NORMAL)
+                self.chat_display.insert(tk.END, history)
+                self.chat_display.configure(state=tk.DISABLED)
+                self.chat_display.see(tk.END)
 
     def send_message(self, event=None):
         """Send a message to the selected peer."""
         self.message = self.entry_message.get()
         if self.message:
             self.peer.send_data(self.client_name, self.message)
-            self.display_message(f"You: {self.message}")
+            self.display_message(f"You- {self.message}")
             self.entry_message.delete(0, tk.END)
 
     def display_message(self, message):
