@@ -1,70 +1,110 @@
 import socket
-import threading
 import ssl
+import threading
+import os
+import uuid
 import tkinter as tk
 from tkinter import messagebox, scrolledtext
 
 
 class Peer:
-    def __init__(self, host, port, certfile, keyfile):
+    def __init__(self, host, port):
         self.host = host    # Initialize host
         self.port = port    # Initialize port
-        self.certfile = certfile   # Certificate
-        self.keyfile = keyfile     # Private key        
-        self.connections = {}  # Store active connections
         
-        self.ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        self.ssl_context.load_cert_chain(certfile=self.certfile, keyfile=self.keyfile)
+        self.contactsListFile = "contacts.txt"
         
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)  # TCP SOCKET        
+        self.message = None
+        self.hostToMsg = None
+        self.portToMsg = None
+        
+        self.ssl_server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        self.ssl_client_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)  
+
+        self.ssl_server_context.load_cert_chain(certfile="server.crt", keyfile="server.key")
+        
+        self.ssl_client_context.load_verify_locations("server.crt")
+        self.ssl_client_context.check_hostname = False
+        self.ssl_client_context.verify_mode = ssl.CERT_REQUIRED
+        
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.connections = {}  
+        self.folder_path = str(self.host) +"_"+ str(self.port)
+        
+        if not os.path.exists(self.folder_path):
+            os.mkdir(self.folder_path)
+            print(f"Folder '{self.folder_path}' created.")
 
     def connect(self, host, port, name):
-        """Connect to a peer with SSL."""
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        context.load_verify_locations(self.certfile)
-
-
+        """Connect to a peer."""
+        
         try:
             connection = socket.create_connection((host, port))
-            ssl_connection = context.wrap_socket(connection, server_hostname=host)
+            
+            ssl_conn = self.ssl_client_context.wrap_socket(connection, server_hostname=host)
+            
             self.connections[name] = {
-                'socket': ssl_connection,
+                'socket': ssl_conn,
                 'address': (host, port)
             }
+            
             print(f"Connected to {name} at {host}:{port}")
-            threading.Thread(target=self.handle_client, args=(ssl_connection, name)).start()
+            
+            threading.Thread(target=self.handle_client, args=(ssl_conn, name)).start()
+            
+            # Cria historico das conversas
+            historicConversation = self.folder_path + "/" + str(host) +"_"+ str(port) + ".txt"
+            
+            if not os.path.exists(historicConversation):
+                open(historicConversation, "x")
+                print(f"File '{historicConversation}' created.")
+                
+            #Cria lista de contatos
+            contactsListPath = self.folder_path + "/" + self.contactsListFile
+            
+            if not os.path.exists(contactsListPath):
+                open(contactsListPath, "a").write(str(host) +"_"+ str(port) + "-" + name + "\n")
+                
         except socket.error as e:
             print(f"Failed to connect to {host}:{port}. Error: {e}")
 
-
     def listen(self):
-        """Listen for incoming connections with SSL."""
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.load_cert_chain(certfile=self.certfile, keyfile=self.keyfile)
-
-
-
+        """Listen for incoming connections."""
+        
         self.socket.bind((self.host, self.port))
+        print(self.socket)
+        
         self.socket.listen(10)
         print(f"Listening for connections on {self.host}:{self.port}")
 
         while True:
             try:
                 connection, address = self.socket.accept()
-                ssl_connection = context.wrap_socket(connection, server_side=True)  # Wrap in SSL
+                print(connection)
+                
+                ssl_conn = self.ssl_server_context.wrap_socket(connection, server_side=True)
+                
                 name = f"{address[0]}:{address[1]}"
-                self.connections[name] = {'socket': ssl_connection}
-                threading.Thread(target=self.handle_client, args=(ssl_connection, name)).start()
+                self.connections[name] = {'socket': ssl_conn}
+                
+                threading.Thread(target=self.handle_client, args=(ssl_conn, name)).start()
             except OSError as e:
                 print(f"Socket error: {e}")
                 break
 
-
     def send_data(self, name, message):
         """Send plaintext data."""
         try:
+            self.message = message
             connection_info = self.connections[name]
-            connection_info['socket'].sendall(message.encode())
+            
+            self.hostToMsg, self.portToMsg = connection_info.get('address')
+            
+            connection_info['socket'].sendall(("MSG:"+message).encode()) #Envia mensage
+            
+            host_port=str(self.host) +"_"+ str(self.port)
+            connection_info['socket'].sendall(("MSG:"+host_port).encode()) #Envia host e port
+
         except socket.error as e:
             print(f"Failed to send data. Error: {e}")
 
@@ -72,13 +112,46 @@ class Peer:
         """Handle incoming messages from a client."""
         while True:
             try:
-                data = connection.recv(1024)
+                
+                data = connection.recv(1024) #Recebe mensagem
+                
                 if not data:
                     break
                 message = data.decode()
-                print(f"\nReceived data from {name}: {message}")
-                # Notify all clients except the sender
-                self.notify_all_clients(f"{name}: {message}", sender_socket=connection)
+                
+                if message.startswith("MSG:"):
+                    host_port=connection.recv(1024).decode() #Recebe host e port
+                    host_port = host_port[4:] #Remove o prefixo "MSG:"
+                    host, port = host_port.split("_")
+                    
+                    message = message[4:]  #Remove o prefixo "MSG:"
+                    print(f"\nReceived data from {host + ":" + port}: {message}")
+
+
+                    open(self.folder_path + "/" + str(host) +"_"+ str(port) + ".txt", "a").write(host + ":" + port + "- " + message + "\n")
+                    contactsListPath = self.folder_path + "/" + self.contactsListFile
+                    if not os.path.exists(contactsListPath):
+                        open(contactsListPath, "a").write(str(host) +"_"+ str(port) + "-" + str(host) +":"+ str(port) + "\n")
+
+                    # Envia confirmação de recebimento
+                    connection.sendall("ACK".encode()) #Envia confirmação
+
+                    # Notify all clients except the sender
+                    self.notify_all_clients(f"{name}: {message}", sender_socket=connection)
+                    
+                    self.connections[name] = {
+                        'socket': connection,
+                        'address': (host, port)  # Store address properly
+                    }
+                    print(self.connections)
+                    print(f"Connected to {name} at {host}:{port}")
+                    
+##################### Cliente que enviou mesagem recebe a confirmação e regista no historico da conversa ###################################################################
+                if message.startswith("ACK"):
+                    print(self.message)
+                    print(f"Message to {name} delivered successfully.")
+                    open(self.folder_path + "/" + str(self.hostToMsg) +"_"+ str(self.portToMsg) + ".txt", "a").write("You- " + self.message + "\n")
+
             except socket.error as e:
                 print(f"Socket error: {e}")
                 break
@@ -189,13 +262,101 @@ class P2PChatApp(tk.Tk):
         self.client_listbox = tk.Listbox(self.main_frame)
         self.client_listbox.pack(fill=tk.BOTH, expand=True, padx=10)
 
-        self.load_clients()
+        #self.load_clients()
+        # Carregar a lista de contactos do ficheiro
+        self.load_contact_list()
 
         self.start_chat_button = tk.Button(self.main_frame, text="Start Chat", command=self.start_chat)
         self.start_chat_button.pack(pady=10)
+        
+        self.edit_name_button = tk.Button(self.main_frame, text="Edit Contact Name", command=self.edit_client_name)
+        self.edit_name_button.pack(pady=10)
 
         self.back_button = tk.Button(self.main_frame, text="Back", command=self.create_menu)
         self.back_button.pack()
+
+    def edit_client_name(self):
+        """Edit the name of the selected client."""
+        selected_client = self.client_listbox.curselection()
+        if selected_client:
+            client_name = self.client_listbox.get(selected_client)
+
+            # Abrir uma nova janela para edição
+            edit_window = tk.Toplevel(self)
+            edit_window.title(f"Edit Name of {client_name}")
+            edit_window.geometry("300x150")
+
+            tk.Label(edit_window, text="Enter new name:").pack(pady=10)
+            new_name_entry = tk.Entry(edit_window)
+            new_name_entry.pack(pady=5, padx=20)
+
+            def save_new_name():
+                new_name = new_name_entry.get()
+                if new_name:
+                    # Obtenha o IP e Porta do cliente selecionado
+                    client_info = self.peer.connections[client_name]
+                    host, port = client_info['address']
+
+                    # Caminho para o ficheiro contacts.txt
+                    contacts_list_path = os.path.join(self.peer.folder_path, self.peer.contactsListFile)
+                    contactsListPath = self.peer.folder_path + "/" + self.peer.contactsListFile
+                    if os.path.exists(contactsListPath):
+                        with open(contactsListPath, "r") as file:
+                            lines = file.readlines()
+
+                        # Procurar e modificar a linha correspondente ao contato
+                        updated_lines = []
+                        for line in lines:
+                            print(line)
+                            contact_ip_port, contact_name = line.strip().split('-')
+                            print(contact_ip_port)
+                            print(contact_name)
+                            if contact_ip_port == f"{host}_{port}":
+                                # Substituir pelo novo nome
+                                updated_lines.append(f"{contact_ip_port}-{new_name}\n")
+                            else:
+                                updated_lines.append(line)
+
+                        # Reescrever o ficheiro com o nome atualizado
+                        with open(contactsListPath, 'w') as file:
+                            file.writelines(updated_lines)
+
+                        print(self.peer.connections)
+                        # Atualizar o nome na lista de conexões (dicionário interno)
+                        connection_data  = self.peer.connections.pop(client_name)
+                        self.peer.connections[new_name] = connection_data
+                        print(self.peer.connections)
+                        # Atualizar a listbox de clientes
+                        self.load_clients()
+
+                        messagebox.showinfo("Success", f"Contact name updated to {new_name}")
+                        edit_window.destroy()
+                    else:
+                        messagebox.showerror("Error", "Contacts file not found.")
+                else:
+                    messagebox.showwarning("Invalid Input", "Please enter a valid name.")
+
+            tk.Button(edit_window, text="Save", command=save_new_name).pack(pady=10)
+
+        else:
+            messagebox.showwarning("Invalid Selection", "Please select a client to edit the name.")
+
+
+    def load_contact_list(self):
+        """Carregar a lista de contactos do ficheiro contacts.txt e exibir na listbox."""
+        contacts_list_path = os.path.join(self.peer.folder_path, self.peer.contactsListFile)
+
+        if os.path.exists(contacts_list_path):
+            with open(contacts_list_path, 'r') as file:
+                contacts = file.readlines()
+
+            # Adicionar os contactos à listbox
+            for contact in contacts:
+                contact = contact.strip().split('-')[-1]  # Remover quebras de linha
+                self.client_listbox.insert(tk.END, contact)
+        else:
+            messagebox.showinfo("Info", "No contacts found.")
+
 
     def load_clients(self):
         """Load the list of connected clients."""
@@ -207,7 +368,32 @@ class P2PChatApp(tk.Tk):
         selected_client = self.client_listbox.curselection()
         if selected_client:
             client_name = self.client_listbox.get(selected_client)
-            self.chat_window = ChatWindow(self.peer, client_name)
+            
+            # Carregar histórico da conversa do cliente
+            client_info = self.peer.connections.get(client_name)
+            if client_info:
+                host, port = client_info['address']
+                file_path = os.path.join(self.peer.folder_path, f"{host}_{port}.txt")
+
+                self.chat_window = ChatWindow(self.peer, client_name, file_path)
+            else:
+                host_port= None
+                #Abrir lista de contactos
+                contacts_list_path = os.path.join(self.peer.folder_path, self.peer.contactsListFile)
+                if os.path.exists(contacts_list_path):
+                    with open(contacts_list_path, 'r') as file:
+                        contacts = file.readlines()
+
+                    # Encontrar ip:port correspondente a client_name
+                    for contact in contacts:
+                        if contact.strip().split('-')[-1] == client_name: #Verifica se o nome do contato corresponde ao selecionado
+                            host_port = contact.strip().split('-')[0] #Obtemm o ip:port do contato
+                            host, port = host_port.split(':')
+                            self.peer.connect(host, port, client_name) #Conecta-se ao contato
+                            break
+                self.chat_window = ChatWindow(self.peer, client_name, file_path)
+            
+            #self.chat_window = ChatWindow(self.peer, client_name, None)
         else:
             messagebox.showwarning("Invalid Selection", "Please select a client to start the chat.")
 
@@ -218,10 +404,13 @@ class P2PChatApp(tk.Tk):
 
 
 class ChatWindow(tk.Toplevel):
-    def __init__(self, peer, client_name):
+    def __init__(self, peer, client_name, file_path):
         super().__init__()
         self.peer = peer
         self.client_name = client_name
+        
+        self.file_path = file_path  # Caminho do arquivo de histórico
+        
         self.title(f"Chat with {client_name}")
         self.geometry("400x400")
         self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -235,17 +424,31 @@ class ChatWindow(tk.Toplevel):
 
         self.send_button = tk.Button(self, text="Send", command=self.send_message)
         self.send_button.pack(side=tk.RIGHT)
+        
+        # Carregar o histórico do arquivo e exibi-lo na janela
+        self.load_chat_history()
 
         # Start listening for messages in a separate thread
         self.listen_thread = threading.Thread(target=self.listen_for_messages, daemon=True)
         self.listen_thread.start()
+        
+    def load_chat_history(self):
+        """Carregar histórico de mensagens do arquivo e exibir."""
+        if os.path.exists(self.file_path):
+            with open(self.file_path, 'r') as file:
+                history = file.read()
+            if history:
+                self.chat_display.configure(state=tk.NORMAL)
+                self.chat_display.insert(tk.END, history)
+                self.chat_display.configure(state=tk.DISABLED)
+                self.chat_display.see(tk.END)
 
     def send_message(self, event=None):
         """Send a message to the selected peer."""
-        message = self.entry_message.get()
-        if message:
-            self.peer.send_data(self.client_name, message)
-            self.display_message(f"You: {message}")
+        self.message = self.entry_message.get()
+        if self.message:
+            self.peer.send_data(self.client_name, self.message)
+            self.display_message(f"You- {self.message}")
             self.entry_message.delete(0, tk.END)
 
     def display_message(self, message):
@@ -272,6 +475,7 @@ class ChatWindow(tk.Toplevel):
     def on_close(self):
         self.destroy()
 
+
 if __name__ == "__main__":
     import argparse
     import sys
@@ -279,12 +483,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Start a peer in the P2P network.")
     parser.add_argument("--host", type=str, required=True, help="Host IP for this peer")
     parser.add_argument("--port", type=int, required=True, help="Port number for this peer")
-    parser.add_argument("--certificate", type=str, required=True, help="Path to the SSL certificate")
-    parser.add_argument("--privateKey", type=str, required=True, help="Path to the private key")
 
     args = parser.parse_args()
 
-    peer = Peer(args.host, args.port, args.certificate, args.privateKey)
+    peer = Peer(args.host, args.port)
     peer.start()
 
     app = P2PChatApp(peer)
