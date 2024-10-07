@@ -82,60 +82,38 @@ class Peer:
         try:
             self.message = message
             connection_info = self.connections[name]
-            
+
+            # Retrieve host and port of the recipient
             self.hostToMsg, self.portToMsg = connection_info.get('address')
-            
-            connection_info['socket'].sendall(("MSG:"+message).encode()) #Envia mensage
-            
-            host_port=str(self.host) +"_"+ str(self.port)
-            connection_info['socket'].sendall(("MSG:"+host_port).encode()) #Envia host e port
+
+            # Send the message
+            connection_info['socket'].sendall(message.encode())
 
         except socket.error as e:
             print(f"Failed to send data. Error: {e}")
+
 
     def handle_client(self, connection, name):
         """Handle incoming messages from a client."""
         while True:
             try:
-                
-                data = connection.recv(1024) #Recebe mensagem
-                
+                data = connection.recv(1024)  # Receive message
                 if not data:
                     break
+
+                # Decode the received data
                 message = data.decode()
-                
-                if message.startswith("MSG:"):
-                    host_port=connection.recv(1024).decode() #Recebe host e port
-                    host_port = host_port[4:] #Remove o prefixo "MSG:"
-                    host, port = host_port.split("_")
-                    
-                    message = message[4:]  #Remove o prefixo "MSG:"
-                    print(f"\nReceived data from {host + ":" + port}: {message}")
 
+                # Log the message with sender's host/port
+                print(f"\nReceived data from {name}: {message}")
 
-                    open(self.folder_path + "/" + str(host) +"_"+ str(port) + ".txt", "a").write(host + ":" + port + "- " + message + "\n")
-                    contactsListPath = self.folder_path + "/" + self.contactsListFile
-                    if not os.path.exists(contactsListPath):
-                        open(contactsListPath, "a").write(str(host) +"_"+ str(port) + "-" + str(host) +":"+ str(port) + "\n")
+                # Save message to history file
+                host, port = connection.getpeername()
+                with open(self.folder_path + "/" + f"{host}_{port}.txt", "a") as f:
+                    f.write(f"{host}:{port} - {message}\n")
 
-                    # Envia confirmação de recebimento
-                    connection.sendall("ACK".encode()) #Envia confirmação
-
-                    # Notify all clients except the sender
-                    self.notify_all_clients(f"{name}: {message}", sender_socket=connection)
-                    
-                    self.connections[name] = {
-                        'socket': connection,
-                        'address': (host, port)  # Store address properly
-                    }
-                    print(self.connections)
-                    print(f"Connected to {name} at {host}:{port}")
-                    
-##################### Cliente que enviou mesagem recebe a confirmação e regista no historico da conversa ###################################################################
-                if message.startswith("ACK"):
-                    print(self.message)
-                    print(f"Message to {name} delivered successfully.")
-                    open(self.folder_path + "/" + str(self.hostToMsg) +"_"+ str(self.portToMsg) + ".txt", "a").write("You- " + self.message + "\n")
+                # Notify other clients
+                self.notify_all_clients(f"{name}: {message}", sender_socket=connection)
 
             except socket.error as e:
                 print(f"Socket error: {e}")
@@ -145,15 +123,13 @@ class Peer:
         del self.connections[name]
         connection.close()
 
-    def notify_all_clients(self, message, sender_socket=None):
-        """Notify all clients about a new message, except the sender."""
-        for name, conn_info in self.connections.items():
-            if conn_info['socket'] != sender_socket:  # Exclude the sender
-                try:
-                    conn_info['socket'].sendall(message.encode())
-                except socket.error as e:
-                    print(f"Failed to notify client {name}. Error: {e}")
-                    continue
+
+    def notify_all_clients(self, message, sender_socket):
+        for client_name, client_info in self.connections.items():
+            if client_info['socket'] != sender_socket:
+                # Send the message from the client with their name
+                client_info['socket'].sendall(message.encode())
+
 
     def start(self):
         """Start listening for connections."""
@@ -429,12 +405,16 @@ class ChatWindow(tk.Toplevel):
                 self.chat_display.see(tk.END)
 
     def send_message(self, event=None):
-        """Send a message to the selected peer."""
-        self.message = self.entry_message.get()
-        if self.message:
-            self.peer.send_data(self.client_name, self.message)
-            self.display_message(f"You- {self.message}")
+        """Send the message typed by the user."""
+        message = self.entry_message.get()
+        if message:
+
+            self.display_message(f"You- {message}")
+
+            self.peer.send_data(self.client_name, message)
+
             self.entry_message.delete(0, tk.END)
+
 
     def display_message(self, message):
         """Display the message in the chat window."""
