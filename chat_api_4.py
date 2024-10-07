@@ -356,19 +356,12 @@ class P2PChatApp(tk.Tk):
 
 
     def send_message(self, client_name):
-        """Send a message to the selected client."""
-    
-        message = self.message_input.get()  # Get message from input box
-        if client_name in self.connections:
-            self.peer.send_data(client_name, message)
-        else:
-            print(f"Client {client_name} is not connected.")
+        """Send a message to the specified client."""
+        message = self.message_input.get()  # Obtém a mensagem do campo de entrada
         
-        message = self.message_entry.get()
-        if message:
-            self.peer.send_data(client_name, message)
-            self.chat_history_text.insert(tk.END, f"You: {message}\n")
-            self.message_entry.delete(0, tk.END)
+        if message:  # Verifica se a mensagem não está vazia
+            self.messages_area.insert(tk.END, f"You: {message}\n")  # Adiciona a mensagem à área de mensagens
+            self.message_input.delete(0, tk.END)  # Limpa o campo de entrada
 
     def load_chat_history(self, host, port):
         """Load and display the chat history for the selected client."""
