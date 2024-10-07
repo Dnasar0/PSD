@@ -354,13 +354,15 @@ class P2PChatApp(tk.Tk):
             # Start a new thread for the client
             threading.Thread(target=self.handle_client, args=(connection, client_name)).start()
 
-
     def send_message(self, client_name):
         """Send a message to the specified client."""
         message = self.message_input.get()  # Obtém a mensagem do campo de entrada
+        #message = self.entry_message.get()
         
         if message:  # Verifica se a mensagem não está vazia
-            self.messages_area.insert(tk.END, f"You: {message}\n")  # Adiciona a mensagem à área de mensagens
+            self.messages_area.config(state='normal')  # Permite a edição da área de texto
+            self.messages_area.insert(tk.END, f"{self.client_name}: {message}\n")  # Adiciona a mensagem à área de mensagens
+            self.messages_area.config(state='disabled')  # Desabilita a edição da área de texto
             self.message_input.delete(0, tk.END)  # Limpa o campo de entrada
 
     def load_chat_history(self, host, port):
