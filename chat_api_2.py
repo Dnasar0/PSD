@@ -86,18 +86,31 @@ class Peer:
             # Retrieve host and port of the recipient
             self.hostToMsg, self.portToMsg = connection_info.get('address')
 
-            # Send the message
-            connection_info['socket'].sendall(message.encode())
+            # Prefix the message with its length
+            message = message.encode()
+            message_length = len(message).to_bytes(4, 'big')  # Use 4 bytes for length
+            connection_info['socket'].sendall(message_length + message)
 
         except socket.error as e:
             print(f"Failed to send data. Error: {e}")
+
 
 
     def handle_client(self, connection, name):
         """Handle incoming messages from a client."""
         while True:
             try:
-                data = connection.recv(1024)  # Receive message
+                # First, read the length of the message (4 bytes)
+                raw_message_length = connection.recv(4)
+                if not raw_message_length:
+                    break
+
+                # Convert the length from bytes to an integer
+                message_length = int.from_bytes(raw_message_length, 'big')
+
+                # Then, read the exact number of bytes for the actual message
+                data = connection.recv(message_length)
+
                 if not data:
                     break
 
@@ -108,7 +121,7 @@ class Peer:
                 print(f"\nReceived data from {name}: {message}")
 
                 # Save message to history file
-                host, port = connection.getpeername()
+                host, port = connection.getpeername()   
                 with open(self.folder_path + "/" + f"{host}_{port}.txt", "a") as f:
                     f.write(f"{host}:{port} - {message}\n")
 
@@ -118,6 +131,11 @@ class Peer:
             except socket.error as e:
                 print(f"Socket error: {e}")
                 break
+
+        print(f"Connection from {name} closed.")
+        del self.connections[name]
+        connection.close()
+
 
         print(f"Connection from {name} closed.")
         del self.connections[name]
