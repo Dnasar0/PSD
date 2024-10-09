@@ -8,9 +8,9 @@ from p2pchatapp import P2PChatApp
 
 
 class Peer:
-    def __init__(self, host, port):
+    def __init__(self, host):
         self.host = host    # Initialize host
-        self.port = port    # Initialize port
+        self.port = 0    # Initialize port as 0 for automatic assignment
         
         self.contactsListFile = "contacts.txt"
         
@@ -54,8 +54,8 @@ class Peer:
 
     def listen(self):
         """Listen for incoming connections."""
-        self.socket.bind((self.host, self.port))
-        self.socket.listen(10)
+        #self.socket.bind((self.host, self.port))
+        #self.socket.listen(10)
         print(f"Listening for connections on {self.host}:{self.port}")
 
         while True:
@@ -171,6 +171,14 @@ class Peer:
 
     def start(self):
         """Start listening for connections."""
+        # Bind to host and port 0 to let the system choose the port
+        self.socket.bind((self.host, self.port))
+        
+        # Get the assigned port
+        self.port = self.socket.getsockname()
+        
+        self.socket.listen(10)
+        print(f"Listening for connections on {self.host}:{self.port}")
         listen_thread = threading.Thread(target=self.listen)
         listen_thread.start()
 
