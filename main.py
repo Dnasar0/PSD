@@ -1,28 +1,22 @@
 from peer import Peer
 from p2pchatapp import P2PChatApp
 
-def get_user_input():
-    # Solicita o IP e a porta ao usuário
-    host = input("Digite o endereço IP (padrão: localhost): ")
-    if not host:  # Set default value if input is empty
-        host = "localhost"
-        
-    try:
-        port = int(input("Digite a porta (padrão: 5000): "))
-    except ValueError:
-        print("Porta inválida. Usando a porta padrão: 5000.")
-        port = 5000  # Default port
+def main():
+    # Defina o host como 'localhost'
+    host = 'localhost'  # Ou use socket.gethostbyname(socket.gethostname()) para o IP local
 
-    return host, port
+    # Crie uma instância da classe Peer
+    peer = Peer(host)
 
-if __name__ == "__main__":
-    # Obtém o host e a porta do usuário
-    host, port = get_user_input()
+    # Inicie a escuta por conexões
+    peer.start()
 
-    # Cria uma instância da classe Peer com o host e porta especificados
-    peer = Peer(host, port)
-    peer.start()  # Inicie a escuta em uma thread separada
+    # Exibir a porta escolhida automaticamente
+    print(f"Você está ouvindo na porta: {peer.port}")
 
-    # Inicia a aplicação principal
+    # Inicie a aplicação gráfica
     app = P2PChatApp(peer)
     app.mainloop()
+
+if __name__ == "__main__":
+    main()
