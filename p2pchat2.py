@@ -135,24 +135,13 @@ class P2PChatApp:
         self.current_frame = tk.Frame(self.root)
         self.current_frame.pack(pady=20)
 
-        self.info_label = tk.Label(
-            self.current_frame, 
-            text=f"Your IP: {self.host}\nYour Port: {self.port}"
-        )
+        self.info_label = tk.Label(self.current_frame, text=f"Your IP: {self.host}\nYour Port: {self.port}")
         self.info_label.pack(pady=10)
 
-        self.connect_button = tk.Button(
-            self.current_frame, 
-            text="Connect to a new peer", 
-            command=self.show_connection_inputs
-        )
+        self.connect_button = tk.Button(self.current_frame, text="Connect to a new peer", command=self.show_connection_inputs)
         self.connect_button.pack(pady=10)
 
-        self.list_button = tk.Button(
-            self.current_frame, 
-            text="Peer List", 
-            command=self.show_peer_list
-        )
+        self.list_button = tk.Button(self.current_frame, text="Peer List", command=self.show_peer_list)
         self.list_button.pack(pady=10)
 
     def show_connection_inputs(self):
@@ -166,18 +155,10 @@ class P2PChatApp:
         self.peer_port_entry = tk.Entry(self.current_frame)
         self.peer_port_entry.pack(pady=5)
 
-        self.connect_peer_button = tk.Button(
-            self.current_frame, 
-            text="Connect", 
-            command=self.connect_to_peer
-        )
+        self.connect_peer_button = tk.Button(self.current_frame, text="Connect", command=self.connect_to_peer)
         self.connect_peer_button.pack(pady=10)
 
-        back_button = tk.Button(
-            self.current_frame, 
-            text="Back", 
-            command=self.setup_main_menu
-        )
+        back_button = tk.Button(self.current_frame, text="Back", command=self.setup_main_menu)
         back_button.pack(pady=10)
 
     def clear_frame(self):
@@ -274,14 +255,7 @@ class P2PChatApp:
                 if peer_fingerprint in self.trusted_peers:
                     # Peer confiável, envia a chave AES ao servidor
                     aes_key = self.generate_aes_key()
-                    encrypted_aes_key = peer_certificate.public_key().encrypt(
-                        aes_key,
-                        padding.OAEP(
-                            mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                            algorithm=hashes.SHA256(),
-                            label=None
-                        )
-                    )
+                    encrypted_aes_key = peer_certificate.public_key().encrypt(aes_key,padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()),algorithm=hashes.SHA256(),label=None))
                     # Envia o tamanho e a chave AES criptografada
                     sock.sendall(len(encrypted_aes_key).to_bytes(4, byteorder='big'))
                     sock.sendall(encrypted_aes_key)
@@ -289,15 +263,8 @@ class P2PChatApp:
                     # Adiciona o peer
                     peer = Peer(peer_ip, int(peer_port), sock, peer_certificate, aes_key)
                     self.peers[peer_ip] = peer
-                    threading.Thread(
-                        target=self.receive_messages, 
-                        args=(peer,), 
-                        daemon=True
-                    ).start()
-                    messagebox.showinfo(
-                        "Connection successful", 
-                        f"Connected to {peer_ip}:{peer_port}"
-                    )
+                    threading.Thread(target=self.receive_messages, args=(peer,), daemon=True).start()
+                    messagebox.showinfo("Connection successful", f"Connected to {peer_ip}:{peer_port}")
                 else:
                     # Peer não confiável, adicionar automaticamente para simplificar
                     print(f"Untrusted peer ({peer_ip}:{peer_port}) automatically added to the ACL")
@@ -306,13 +273,7 @@ class P2PChatApp:
 
                     # Envia a chave AES ao servidor
                     aes_key = self.generate_aes_key()
-                    encrypted_aes_key = peer_certificate.public_key().encrypt(
-                        aes_key,
-                        padding.OAEP(
-                            mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                            algorithm=hashes.SHA256(),
-                            label=None
-                        )
+                    encrypted_aes_key = peer_certificate.public_key().encrypt(aes_key,padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()),algorithm=hashes.SHA256(),label=None)
                     )
                     # Envia o tamanho e a chave AES criptografada
                     sock.sendall(len(encrypted_aes_key).to_bytes(4, byteorder='big'))
@@ -321,23 +282,13 @@ class P2PChatApp:
                     # Adiciona o peer
                     peer = Peer(peer_ip, int(peer_port), sock, peer_certificate, aes_key)
                     self.peers[peer_ip] = peer
-                    threading.Thread(
-                        target=self.receive_messages, 
-                        args=(peer,), 
-                        daemon=True
-                    ).start()
-                    messagebox.showinfo(
-                        "Connection successful", 
-                        f"Connected and trusted {peer_ip}:{peer_port}"
-                    )
+                    threading.Thread(target=self.receive_messages, args=(peer,), daemon=True).start()
+                    messagebox.showinfo("Connection successful", f"Connected and trusted {peer_ip}:{peer_port}")
 
                 self.setup_main_menu()
 
             except Exception as e:
-                messagebox.showerror(
-                    "Connection error", 
-                    f"Unable to connect to {peer_ip}:{peer_port}\nError: {e}"
-                )
+                messagebox.showerror("Connection error", f"Unable to connect to {peer_ip}:{peer_port}\nError: {e}")
 
     def receive_all(self, conn):
         """
@@ -385,14 +336,7 @@ class P2PChatApp:
         """
         Descriptografa a chave AES recebida usando a chave privada RSA.
         """
-        decrypted_aes_key = self.private_key.decrypt(
-            encrypted_aes_key,
-            padding.OAEP(
-                mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                algorithm=hashes.SHA256(),
-                label=None
-            )
-        )
+        decrypted_aes_key = self.private_key.decrypt(encrypted_aes_key,padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()),algorithm=hashes.SHA256(),label=None))
         return decrypted_aes_key
 
     def generate_aes_key(self):
@@ -453,18 +397,10 @@ class P2PChatApp:
                     selected_peer = self.peers[selected_peer_ip]
                     self.open_chat_window(selected_peer)
 
-            open_chat_button = tk.Button(
-                self.current_frame, 
-                text="Open Chat", 
-                command=open_chat
-            )
+            open_chat_button = tk.Button(self.current_frame, text="Open Chat", command=open_chat)
             open_chat_button.pack(pady=10)
 
-        back_button = tk.Button(
-            self.current_frame, 
-            text="Back", 
-            command=self.setup_main_menu
-        )
+        back_button = tk.Button(self.current_frame, text="Back", command=self.setup_main_menu)
         back_button.pack(pady=10)
 
     def open_chat_window(self, peer):
@@ -486,11 +422,7 @@ class P2PChatApp:
         message_entry = tk.Entry(chat_window, textvariable=message_var, width=50)
         message_entry.pack(pady=5, padx=10, fill=tk.X)
 
-        send_button = tk.Button(
-            chat_window, 
-            text="Send", 
-            command=lambda: self.send_message(peer, message_var, chat_text)
-        )
+        send_button = tk.Button(chat_window, text="Send", command=lambda: self.send_message(peer, message_var, chat_text))
         send_button.pack(pady=5)
 
         # Bind Enter key to send message
@@ -560,12 +492,9 @@ class P2PChatApp:
         Retorna o nonce concatenado com o ciphertext e o tag.
         """
         nonce = secrets.token_bytes(12)
-        encryptor = Cipher(
-            algorithms.AES(aes_key),
-            modes.GCM(nonce),
-            backend=default_backend()
-        ).encryptor()
+        encryptor = Cipher(algorithms.AES(aes_key),modes.GCM(nonce),backend=default_backend()).encryptor()
         ciphertext = encryptor.update(message.encode('utf-8')) + encryptor.finalize()
+        
         return nonce + ciphertext + encryptor.tag
 
     def decrypt_message(self, encrypted_message, aes_key):
@@ -576,12 +505,9 @@ class P2PChatApp:
         nonce = encrypted_message[:12]
         tag = encrypted_message[-16:]
         ciphertext = encrypted_message[12:-16]
-        decryptor = Cipher(
-            algorithms.AES(aes_key),
-            modes.GCM(nonce, tag),
-            backend=default_backend()
-        ).decryptor()
+        decryptor = Cipher(algorithms.AES(aes_key),modes.GCM(nonce, tag),backend=default_backend()).decryptor()
         plaintext = decryptor.update(ciphertext) + decryptor.finalize()
+        
         return plaintext.decode('utf-8')
 
 # Função principal para iniciar o cliente-servidor
