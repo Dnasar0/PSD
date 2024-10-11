@@ -12,39 +12,40 @@ from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography import x509
 from cryptography.x509.oid import NameOID
-from cryptography.exceptions import InvalidSignature
 import datetime
 import secrets
 
-# Caminho para armazenar certificados e chaves
+# Diretório para armazenar os certificados e chaves
 CERT_DIR = "certificates"
 if not os.path.exists(CERT_DIR):
     os.makedirs(CERT_DIR)
 
-# Caminho para a ACL
+# Caminho para o ficheiro ACL que armazena os peers confiáveis
 ACL_FILE = "trusted_peers.json"
 
+# Classe que representa um Peer conectado
 class Peer:
     def __init__(self, ip, port, connection, certificate, aes_key):
         self.ip = ip
         self.port = port
         self.connection = connection
-        self.certificate = certificate  # Objeto x509
-        self.aes_key = aes_key  # Chave AES para comunicação
-        self.chat_window = None
+        self.certificate = certificate  # Certificado x509 do peer
+        self.aes_key = aes_key  # Chave AES para comunicação segura
+        self.chat_window = None  # Janela de chat associada ao peer
 
+# Classe principal da aplicação P2P
 class P2PChatApp:
     def __init__(self, host, port):
         self.host = host
         self.port = port
-        self.peers = {}
-        self.server_socket = None
+        self.peers = {}  # Dicionário para armazenar os peers conectados
+        self.server_socket = None  # Socket do servidor
 
-        # Carrega ou gera par de chaves e certificado
+        # Carrega ou gera o par de chaves e o certificado
         self.private_key, self.certificate = self.load_or_generate_certificate()
         self.certificate_bytes = self.certificate.public_bytes(serialization.Encoding.PEM)
 
-        # Carrega ACL
+        # Carrega a ACL (Access Control List)
         self.trusted_peers = self.load_acl()
 
         # Inicia a interface gráfica
@@ -56,15 +57,18 @@ class P2PChatApp:
         self.current_frame = None
         self.setup_main_menu()
 
-        # Inicia o servidor em uma nova thread
+        # Inicia o servidor numa nova thread para permitir a execução simultânea
         threading.Thread(target=self.start_server, daemon=True).start()
 
     def load_or_generate_certificate(self):
+        """
+        Carrega ou gera um par de chaves RSA e um certificado autoassinado.
+        """
         cert_path = os.path.join(CERT_DIR, f"peer_{self.port}.pem")
         key_path = os.path.join(CERT_DIR, f"peer_{self.port}_key.pem")
         
         if os.path.exists(cert_path) and os.path.exists(key_path):
-            # Carrega chaves e certificado existentes
+            # Carrega chaves e certificado se já existirem
             with open(key_path, "rb") as key_file:
                 private_key = serialization.load_pem_private_key(
                     key_file.read(),
@@ -75,7 +79,7 @@ class P2PChatApp:
                 certificate = x509.load_pem_x509_certificate(cert_file.read(), default_backend())
             return private_key, certificate
         else:
-            # Gera novo par de chaves RSA
+            # Gera um novo par de chaves RSA
             private_key = rsa.generate_private_key(
                 public_exponent=65537,
                 key_size=2048,
@@ -83,7 +87,7 @@ class P2PChatApp:
             )
             public_key = private_key.public_key()
 
-            # Gera certificado autoassinado
+            # Gera um certificado autoassinado para o peer
             subject = issuer = x509.Name([
                 x509.NameAttribute(NameOID.COMMON_NAME, f"Peer_{self.port}")
             ])
@@ -105,7 +109,7 @@ class P2PChatApp:
                 critical=False
             ).sign(private_key, hashes.SHA256(), default_backend())
 
-            # Salva chaves e certificado
+            # Salva as chaves e o certificado
             with open(key_path, "wb") as key_file:
                 key_file.write(private_key.private_bytes(
                     encoding=serialization.Encoding.PEM,
@@ -118,6 +122,9 @@ class P2PChatApp:
             return private_key, certificate
 
     def load_acl(self):
+        """
+        Carrega a lista de peers confiáveis (ACL) a partir de um ficheiro JSON.
+        """
         if os.path.exists(ACL_FILE):
             with open(ACL_FILE, "r") as f:
                 return json.load(f)
@@ -125,55 +132,70 @@ class P2PChatApp:
             return []
 
     def save_acl(self):
+        """
+        Salva a lista de peers confiáveis no ficheiro ACL.
+        """
         with open(ACL_FILE, "w") as f:
             json.dump(self.trusted_peers, f, indent=4)
 
     def setup_main_menu(self):
+        """
+        Configura o menu principal da interface gráfica.
+        """
         if self.current_frame:
             self.current_frame.destroy()
 
         self.current_frame = tk.Frame(self.root)
         self.current_frame.pack(pady=20)
 
-        self.info_label = tk.Label(self.current_frame, text=f"Your IP: {self.host}\nYour Port: {self.port}")
+        self.info_label = tk.Label(self.current_frame, text=f"Seu IP: {self.host}\nSua Porta: {self.port}")
         self.info_label.pack(pady=10)
 
-        self.connect_button = tk.Button(self.current_frame, text="Connect to a new peer", command=self.show_connection_inputs)
+        self.connect_button = tk.Button(self.current_frame, text="Conectar a um novo peer", command=self.show_connection_inputs)
         self.connect_button.pack(pady=10)
 
-        self.list_button = tk.Button(self.current_frame, text="Peer List", command=self.show_peer_list)
+        self.list_button = tk.Button(self.current_frame, text="Lista de Peers", command=self.show_peer_list)
         self.list_button.pack(pady=10)
 
     def show_connection_inputs(self):
+        """
+        Mostra os campos de entrada para conectar a um novo peer.
+        """
         self.clear_frame()
 
-        tk.Label(self.current_frame, text="Peer IP:").pack(pady=5)
+        tk.Label(self.current_frame, text="IP do Peer:").pack(pady=5)
         self.peer_ip_entry = tk.Entry(self.current_frame)
         self.peer_ip_entry.pack(pady=5)
 
-        tk.Label(self.current_frame, text="Peer port:").pack(pady=5)
+        tk.Label(self.current_frame, text="Porta do Peer:").pack(pady=5)
         self.peer_port_entry = tk.Entry(self.current_frame)
         self.peer_port_entry.pack(pady=5)
 
-        self.connect_peer_button = tk.Button(self.current_frame, text="Connect", command=self.connect_to_peer)
+        self.connect_peer_button = tk.Button(self.current_frame, text="Conectar", command=self.connect_to_peer)
         self.connect_peer_button.pack(pady=10)
 
-        back_button = tk.Button(self.current_frame, text="Back", command=self.setup_main_menu)
+        back_button = tk.Button(self.current_frame, text="Voltar", command=self.setup_main_menu)
         back_button.pack(pady=10)
 
     def clear_frame(self):
+        """
+        Limpa o frame atual para carregar novos widgets.
+        """
         for widget in self.current_frame.winfo_children():
             widget.destroy()
 
     def start_server(self):
+        """
+        Inicia o servidor para aceitar conexões de peers.
+        """
         try:
             self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.server_socket.bind((self.host, self.port))
             self.server_socket.listen(5)
-            print(f"Listening on {self.host}:{self.port}")
+            print(f"A ouvir em {self.host}:{self.port}")
         except Exception as e:
-            print(f"Error starting server: {e}")
-            messagebox.showerror("Error", f"Unable to start server: {e}")
+            print(f"Erro ao iniciar o servidor: {e}")
+            messagebox.showerror("Erro", f"Não foi possível iniciar o servidor: {e}")
             sys.exit(1)
 
         while True:
@@ -187,12 +209,14 @@ class P2PChatApp:
                     daemon=True
                 ).start()
             except Exception as e:
-                print(f"Error accepting connection: {e}")
+                print(f"Erro ao aceitar conexão: {e}")
 
     def handle_new_connection(self, conn, peer_ip, peer_port):
+        """
+        Processa novas conexões recebidas pelos peers.
+        """
         try:
             # Troca de certificados
-            # Recebe o certificado do peer
             peer_cert_bytes = self.receive_all(conn)
             peer_certificate = x509.load_pem_x509_certificate(peer_cert_bytes, default_backend())
 
@@ -202,98 +226,108 @@ class P2PChatApp:
             # Verifica se o peer está na ACL
             peer_fingerprint = peer_certificate.fingerprint(hashes.SHA256()).hex()
             if peer_fingerprint in self.trusted_peers:
-                # Peer confiável, recebe a chave AES do cliente
+                # Se for confiável, recebe a chave AES do peer
                 aes_key = self.receive_aes_key(conn)
-                # Adiciona o peer
                 peer = Peer(peer_ip, peer_port, conn, peer_certificate, aes_key)
                 self.peers[peer_ip] = peer
-                print(f"Trusted Peer Connected: {peer_ip}:{peer_port}")
-                threading.Thread(
-                    target=self.receive_messages, 
-                    args=(peer,), 
-                    daemon=True
-                ).start()
+                print(f"Peer Confiável Conectado: {peer_ip}:{peer_port}")
+                threading.Thread(target=self.receive_messages, args=(peer,), daemon=True).start()
             else:
-                # Peer não confiável, adicionar automaticamente para simplificar
-                # Você pode implementar uma lógica para gerenciar aprovações manualmente
-                print(f"Untrusted peer ({peer_ip}:{peer_port}) automatically added to the ACL")
+                # Se não for confiável, adiciona automaticamente à ACL
+                print(f"Peer não confiável ({peer_ip}:{peer_port}) adicionado automaticamente à ACL")
                 self.trusted_peers.append(peer_fingerprint)
                 self.save_acl()
-                # Recebe a chave AES do cliente
                 aes_key = self.receive_aes_key(conn)
-                # Adiciona o peer
                 peer = Peer(peer_ip, peer_port, conn, peer_certificate, aes_key)
                 self.peers[peer_ip] = peer
-                print(f"Trusted Peer Connected: {peer_ip}:{peer_port}")
-                threading.Thread(
-                    target=self.receive_messages, 
-                    args=(peer,), 
-                    daemon=True
-                ).start()
+                print(f"Peer Confiável Conectado: {peer_ip}:{peer_port}")
+                threading.Thread(target=self.receive_messages, args=(peer,), daemon=True).start()
         except Exception as e:
-            print(f"Error establishing connection with {peer_ip}:{peer_port}: {e}")
+            print(f"Erro ao estabelecer conexão com {peer_ip}:{peer_port}: {e}")
             conn.close()
 
     def connect_to_peer(self):
+        """
+        Conecta a um peer remoto utilizando IP e porta fornecidos pelo utilizador.
+        """
         peer_ip = self.peer_ip_entry.get()
         peer_port = self.peer_port_entry.get()
 
-        if peer_ip and peer_port:
-            try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.connect((peer_ip, int(peer_port)))
+        # Validação de entradas
+        if not self.validate_ip(peer_ip) or not peer_port.isdigit():
+            messagebox.showerror("Erro", "IP ou porta inválidos!")
+            return
 
-                # Envia o próprio certificado
-                sock.sendall(self.certificate_bytes)
+        peer_port = int(peer_port)
 
-                # Recebe o certificado do peer
-                peer_cert_bytes = self.receive_all(sock)
-                peer_certificate = x509.load_pem_x509_certificate(peer_cert_bytes, default_backend())
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.connect((peer_ip, peer_port))
 
-                # Verifica se o peer está na ACL
-                peer_fingerprint = peer_certificate.fingerprint(hashes.SHA256()).hex()
-                if peer_fingerprint in self.trusted_peers:
-                    # Peer confiável, envia a chave AES ao servidor
-                    aes_key = self.generate_aes_key()
-                    encrypted_aes_key = peer_certificate.public_key().encrypt(aes_key,padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()),algorithm=hashes.SHA256(),label=None))
-                    # Envia o tamanho e a chave AES criptografada
-                    sock.sendall(len(encrypted_aes_key).to_bytes(4, byteorder='big'))
-                    sock.sendall(encrypted_aes_key)
+            # Envia o próprio certificado
+            sock.sendall(self.certificate_bytes)
 
-                    # Adiciona o peer
-                    peer = Peer(peer_ip, int(peer_port), sock, peer_certificate, aes_key)
-                    self.peers[peer_ip] = peer
-                    threading.Thread(target=self.receive_messages, args=(peer,), daemon=True).start()
-                    messagebox.showinfo("Connection successful", f"Connected to {peer_ip}:{peer_port}")
-                else:
-                    # Peer não confiável, adicionar automaticamente para simplificar
-                    print(f"Untrusted peer ({peer_ip}:{peer_port}) automatically added to the ACL")
-                    self.trusted_peers.append(peer_fingerprint)
-                    self.save_acl()
+            # Recebe o certificado do peer
+            peer_cert_bytes = self.receive_all(sock)
+            peer_certificate = x509.load_pem_x509_certificate(peer_cert_bytes, default_backend())
 
-                    # Envia a chave AES ao servidor
-                    aes_key = self.generate_aes_key()
-                    encrypted_aes_key = peer_certificate.public_key().encrypt(aes_key,padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()),algorithm=hashes.SHA256(),label=None)
+            # Verifica se o peer está na ACL
+            peer_fingerprint = peer_certificate.fingerprint(hashes.SHA256()).hex()
+            if peer_fingerprint in self.trusted_peers:
+                # Peer confiável, envia a chave AES ao servidor
+                aes_key = self.generate_aes_key()
+                encrypted_aes_key = peer_certificate.public_key().encrypt(
+                    aes_key,
+                    padding.OAEP(
+                        mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                        algorithm=hashes.SHA256(),
+                        label=None
                     )
-                    # Envia o tamanho e a chave AES criptografada
-                    sock.sendall(len(encrypted_aes_key).to_bytes(4, byteorder='big'))
-                    sock.sendall(encrypted_aes_key)
+                )
+                sock.sendall(len(encrypted_aes_key).to_bytes(4, byteorder='big'))
+                sock.sendall(encrypted_aes_key)
 
-                    # Adiciona o peer
-                    peer = Peer(peer_ip, int(peer_port), sock, peer_certificate, aes_key)
-                    self.peers[peer_ip] = peer
-                    threading.Thread(target=self.receive_messages, args=(peer,), daemon=True).start()
-                    messagebox.showinfo("Connection successful", f"Connected and trusted {peer_ip}:{peer_port}")
+                peer = Peer(peer_ip, peer_port, sock, peer_certificate, aes_key)
+                self.peers[peer_ip] = peer
+                threading.Thread(target=self.receive_messages, args=(peer,), daemon=True).start()
+                messagebox.showinfo("Conexão bem-sucedida", f"Conectado a {peer_ip}:{peer_port}")
+            else:
+                print(f"Peer não confiável ({peer_ip}:{peer_port}) adicionado automaticamente à ACL")
+                self.trusted_peers.append(peer_fingerprint)
+                self.save_acl()
 
-                self.setup_main_menu()
+                aes_key = self.generate_aes_key()
+                encrypted_aes_key = peer_certificate.public_key().encrypt(
+                    aes_key,
+                    padding.OAEP(
+                        mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                        algorithm=hashes.SHA256(),
+                        label=None
+                    )
+                )
+                sock.sendall(len(encrypted_aes_key).to_bytes(4, byteorder='big'))
+                sock.sendall(encrypted_aes_key)
 
-            except Exception as e:
-                messagebox.showerror("Connection error", f"Unable to connect to {peer_ip}:{peer_port}\nError: {e}")
+                peer = Peer(peer_ip, peer_port, sock, peer_certificate, aes_key)
+                self.peers[peer_ip] = peer
+                threading.Thread(target=self.receive_messages, args=(peer,), daemon=True).start()
+                messagebox.showinfo("Conexão bem-sucedida", f"Conectado e confiável {peer_ip}:{peer_port}")
+
+            self.setup_main_menu()
+
+        except Exception as e:
+            messagebox.showerror("Erro de conexão", f"Não foi possível conectar a {peer_ip}:{peer_port}\nErro: {e}")
+
+    def validate_ip(self, ip):
+        """
+        Valida se o IP fornecido é válido.
+        """
+        parts = ip.split(".")
+        return len(parts) == 4 and all(part.isdigit() and 0 <= int(part) <= 255 for part in parts)
 
     def receive_all(self, conn):
         """
-        Recebe todos os dados até que não haja mais dados disponíveis.
-        Útil para receber certificados completos.
+        Recebe todos os dados da conexão até que não haja mais.
         """
         data = b''
         while True:
@@ -307,36 +341,37 @@ class P2PChatApp:
 
     def receive_aes_key(self, conn):
         """
-        Recebe a chave AES enviada pelo cliente.
+        Recebe e desencripta a chave AES enviada pelo peer.
         """
-        # Recebe o tamanho da chave AES criptografada
         encrypted_aes_key_length_bytes = self.receive_exact(conn, 4)
         encrypted_aes_key_length = int.from_bytes(encrypted_aes_key_length_bytes, byteorder='big')
-
-        # Recebe a chave AES criptografada
         encrypted_aes_key = self.receive_exact(conn, encrypted_aes_key_length)
-
-        # Descriptografa a chave AES com a chave privada RSA
-        aes_key = self.decrypt_aes_key(encrypted_aes_key)
-        return aes_key
+        return self.decrypt_aes_key(encrypted_aes_key)
 
     def receive_exact(self, conn, num_bytes):
         """
-        Recebe exatamente num_bytes da conexão.
+        Recebe exatamente o número de bytes especificado da conexão.
         """
         data = b''
         while len(data) < num_bytes:
             packet = conn.recv(num_bytes - len(data))
             if not packet:
-                raise Exception("Connection closed before receiving all data!")
+                raise Exception("Conexão fechada antes de receber todos os dados!")
             data += packet
         return data
 
     def decrypt_aes_key(self, encrypted_aes_key):
         """
-        Descriptografa a chave AES recebida usando a chave privada RSA.
+        Desencripta a chave AES usando a chave privada RSA.
         """
-        decrypted_aes_key = self.private_key.decrypt(encrypted_aes_key,padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()),algorithm=hashes.SHA256(),label=None))
+        decrypted_aes_key = self.private_key.decrypt(
+            encrypted_aes_key,
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        )
         return decrypted_aes_key
 
     def generate_aes_key(self):
@@ -346,43 +381,44 @@ class P2PChatApp:
         return secrets.token_bytes(32)
 
     def receive_messages(self, peer):
+        """
+        Recebe mensagens do peer e atualiza a interface de chat.
+        """
         while True:
             try:
-                # Recebe o tamanho da mensagem AES criptografada
                 msg_length_bytes = peer.connection.recv(4)
                 if not msg_length_bytes:
-                    raise Exception("Connection closed by peer!")
+                    raise Exception("Conexão fechada pelo peer!")
                 msg_length = int.from_bytes(msg_length_bytes, byteorder='big')
-
-                # Recebe a mensagem AES criptografada
                 encrypted_message = self.receive_exact(peer.connection, msg_length)
-
-                # Descriptografa a mensagem com AES
                 message = self.decrypt_message(encrypted_message, peer.aes_key)
-                print(f"Message received from {peer.ip}:{peer.port}: {message}")
+                print(f"Mensagem recebida de {peer.ip}:{peer.port}: {message}")
 
                 if peer.chat_window:
                     self.update_chat_window(peer, message, sender=False)
                 self.save_chat_to_file(peer, f"{peer.ip}:{peer.port}: {message}")
 
             except Exception as e:
-                print(f"Connection with {peer.ip}:{peer.port} closed: {e}")
+                print(f"Conexão com {peer.ip}:{peer.port} fechada: {e}")
                 peer.connection.close()
                 del self.peers[peer.ip]
                 break
 
     def show_peer_list(self):
+        """
+        Exibe a lista de peers conectados.
+        """
         if self.current_frame:
             self.current_frame.destroy()
 
         self.current_frame = tk.Frame(self.root)
         self.current_frame.pack(pady=20)
 
-        label = tk.Label(self.current_frame, text="Connected Peers")
+        label = tk.Label(self.current_frame, text="Peers Conectados")
         label.pack(pady=10)
 
         if not self.peers:
-            label = tk.Label(self.current_frame, text="No peers connected")
+            label = tk.Label(self.current_frame, text="Nenhum peer conectado")
             label.pack(pady=10)
         else:
             listbox = tk.Listbox(self.current_frame)
@@ -397,40 +433,40 @@ class P2PChatApp:
                     selected_peer = self.peers[selected_peer_ip]
                     self.open_chat_window(selected_peer)
 
-            open_chat_button = tk.Button(self.current_frame, text="Open Chat", command=open_chat)
+            open_chat_button = tk.Button(self.current_frame, text="Abrir Chat", command=open_chat)
             open_chat_button.pack(pady=10)
 
-        back_button = tk.Button(self.current_frame, text="Back", command=self.setup_main_menu)
+        back_button = tk.Button(self.current_frame, text="Voltar", command=self.setup_main_menu)
         back_button.pack(pady=10)
 
     def open_chat_window(self, peer):
+        """
+        Abre uma janela de chat para comunicação com o peer.
+        """
         if peer.chat_window:
             peer.chat_window.lift()
             return
 
         chat_window = tk.Toplevel(self.root)
-        chat_window.title(f"Chat to {peer.ip}:{peer.port}")
+        chat_window.title(f"Chat com {peer.ip}:{peer.port}")
         chat_window.geometry("500x500")
 
         chat_text = tk.Text(chat_window, height=25, width=60, state=tk.DISABLED)
         chat_text.pack(pady=10)
 
-        # Carregar histórico de conversa do arquivo
         self.load_chat_from_file(peer, chat_text)
 
         message_var = tk.StringVar()
         message_entry = tk.Entry(chat_window, textvariable=message_var, width=50)
         message_entry.pack(pady=5, padx=10, fill=tk.X)
 
-        send_button = tk.Button(chat_window, text="Send", command=lambda: self.send_message(peer, message_var, chat_text))
+        send_button = tk.Button(chat_window, text="Enviar", command=lambda: self.send_message(peer, message_var, chat_text))
         send_button.pack(pady=5)
 
-        # Bind Enter key to send message
         message_entry.bind('<Return>', lambda event: self.send_message(peer, message_var, chat_text))
 
         peer.chat_window = chat_window
 
-        # Exibir mensagens recebidas na janela de chat
         def on_close():
             peer.chat_window = None
             chat_window.destroy()
@@ -438,46 +474,51 @@ class P2PChatApp:
         chat_window.protocol("WM_DELETE_WINDOW", on_close)
 
     def send_message(self, peer, message_var, text_area):
+        """
+        Envia uma mensagem para o peer usando encriptação AES.
+        """
         message = message_var.get()
         if message:
             message_var.set("")  # Limpa o campo de entrada
 
             try:
-                # Criptografa a mensagem usando a chave AES do peer
                 encrypted_message = self.encrypt_message(message, peer.aes_key)
-
-                # Envia o tamanho da mensagem criptografada
                 msg_length = len(encrypted_message)
                 peer.connection.sendall(msg_length.to_bytes(4, byteorder='big'))
-
-                # Envia a mensagem criptografada
                 peer.connection.sendall(encrypted_message)
 
                 self.update_chat_window(peer, message, sender=True)
-                self.save_chat_to_file(peer, f"You: {message}")
+                self.save_chat_to_file(peer, f"Você: {message}")
             except Exception as e:
-                messagebox.showerror("Error", f"Could not send message: {e}")
+                messagebox.showerror("Erro", f"Não foi possível enviar a mensagem: {e}")
 
     def update_chat_window(self, peer, message, sender=False):
+        """
+        Atualiza a janela de chat com novas mensagens.
+        """
         if peer.chat_window:
             text_area = peer.chat_window.children.get('!text')
             if text_area:
                 text_area.config(state=tk.NORMAL)
                 if sender:
-                    text_area.insert(tk.END, f"You: {message}\n")
+                    text_area.insert(tk.END, f"Você: {message}\n")
                 else:
                     text_area.insert(tk.END, f"{peer.ip}:{peer.port}: {message}\n")
                 text_area.config(state=tk.DISABLED)
                 text_area.see(tk.END)
 
     def save_chat_to_file(self, peer, message):
-        # Salva a conversa em um arquivo
+        """
+        Salva a conversa num ficheiro de histórico.
+        """
         filename = f"chat_{peer.ip}_{peer.port}.txt"
         with open(filename, 'a', encoding='utf-8') as f:
             f.write(message + '\n')
 
     def load_chat_from_file(self, peer, text_area):
-        # Carrega o histórico de conversa de um arquivo
+        """
+        Carrega o histórico de conversa a partir de um ficheiro.
+        """
         filename = f"chat_{peer.ip}_{peer.port}.txt"
         if os.path.exists(filename):
             with open(filename, 'r', encoding='utf-8') as f:
@@ -492,7 +533,7 @@ class P2PChatApp:
         Retorna o nonce concatenado com o ciphertext e o tag.
         """
         nonce = secrets.token_bytes(12)
-        encryptor = Cipher(algorithms.AES(aes_key),modes.GCM(nonce),backend=default_backend()).encryptor()
+        encryptor = Cipher(algorithms.AES(aes_key), modes.GCM(nonce), backend=default_backend()).encryptor()
         ciphertext = encryptor.update(message.encode('utf-8')) + encryptor.finalize()
         
         return nonce + ciphertext + encryptor.tag
@@ -505,21 +546,20 @@ class P2PChatApp:
         nonce = encrypted_message[:12]
         tag = encrypted_message[-16:]
         ciphertext = encrypted_message[12:-16]
-        decryptor = Cipher(algorithms.AES(aes_key),modes.GCM(nonce, tag),backend=default_backend()).decryptor()
+        decryptor = Cipher(algorithms.AES(aes_key), modes.GCM(nonce, tag), backend=default_backend()).decryptor()
         plaintext = decryptor.update(ciphertext) + decryptor.finalize()
         
         return plaintext.decode('utf-8')
+
 
 # Função principal para iniciar o cliente-servidor
 def start_peer():
     root = tk.Tk()
     root.withdraw()  # Oculta a janela principal para perguntar porta do servidor
 
-    # Pergunta a porta local do cliente
-    local_port = simpledialog.askinteger("Port", "Enter the local port:")
+    local_port = simpledialog.askinteger("Porta", "Insira a porta local:")
     root.destroy()
 
-    # Inicia a aplicação P2P
     if local_port:
         try:
             host = socket.gethostbyname(socket.gethostname())  # Obtém o IP local
@@ -528,7 +568,7 @@ def start_peer():
         app = P2PChatApp(host, local_port)
         app.root.mainloop()
     else:
-        messagebox.showerror("Error", "Invalid port! The application will be...")
+        messagebox.showerror("Erro", "Porta inválida! A aplicação será encerrada.")
 
 if __name__ == "__main__":
     start_peer()
