@@ -148,13 +148,13 @@ class P2PChatApp:
         self.current_frame = tk.Frame(self.root)
         self.current_frame.pack(pady=20)
 
-        self.info_label = tk.Label(self.current_frame, text=f"Seu IP: {self.host}\nSua Porta: {self.port}")
+        self.info_label = tk.Label(self.current_frame, text=f"Your IP: {self.host}\nYour Port: {self.port}")
         self.info_label.pack(pady=10)
 
-        self.connect_button = tk.Button(self.current_frame, text="Conectar a um novo peer", command=self.show_connection_inputs)
+        self.connect_button = tk.Button(self.current_frame, text="Connect to a peer", command=self.show_connection_inputs)
         self.connect_button.pack(pady=10)
 
-        self.list_button = tk.Button(self.current_frame, text="Lista de Peers", command=self.show_peer_list)
+        self.list_button = tk.Button(self.current_frame, text="Peers List", command=self.show_peer_list)
         self.list_button.pack(pady=10)
 
     def show_connection_inputs(self):
@@ -163,18 +163,18 @@ class P2PChatApp:
         """
         self.clear_frame()
 
-        tk.Label(self.current_frame, text="IP do Peer:").pack(pady=5)
+        tk.Label(self.current_frame, text="Peer IP:").pack(pady=5)
         self.peer_ip_entry = tk.Entry(self.current_frame)
         self.peer_ip_entry.pack(pady=5)
 
-        tk.Label(self.current_frame, text="Porta do Peer:").pack(pady=5)
+        tk.Label(self.current_frame, text="Peer Port:").pack(pady=5)
         self.peer_port_entry = tk.Entry(self.current_frame)
         self.peer_port_entry.pack(pady=5)
 
-        self.connect_peer_button = tk.Button(self.current_frame, text="Conectar", command=self.connect_to_peer)
+        self.connect_peer_button = tk.Button(self.current_frame, text="Connect", command=self.connect_to_peer)
         self.connect_peer_button.pack(pady=10)
 
-        back_button = tk.Button(self.current_frame, text="Voltar", command=self.setup_main_menu)
+        back_button = tk.Button(self.current_frame, text="Back", command=self.setup_main_menu)
         back_button.pack(pady=10)
 
     def clear_frame(self):
@@ -192,10 +192,10 @@ class P2PChatApp:
             self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.server_socket.bind((self.host, self.port))
             self.server_socket.listen(5)
-            print(f"A ouvir em {self.host}:{self.port}")
+            print(f"Listening at {self.host}:{self.port}")
         except Exception as e:
-            print(f"Erro ao iniciar o servidor: {e}")
-            messagebox.showerror("Erro", f"Não foi possível iniciar o servidor: {e}")
+            print(f"Error starting server: {e}")
+            messagebox.showerror("Error", f"Not possible to start the server: {e}")
             sys.exit(1)
 
         while True:
@@ -230,20 +230,20 @@ class P2PChatApp:
                 aes_key = self.receive_aes_key(conn)
                 peer = Peer(peer_ip, peer_port, conn, peer_certificate, aes_key)
                 self.peers[peer_ip] = peer
-                print(f"Peer Confiável Conectado: {peer_ip}:{peer_port}")
+                print(f"Trusted peer connected: {peer_ip}:{peer_port}")
                 threading.Thread(target=self.receive_messages, args=(peer,), daemon=True).start()
             else:
                 # Se não for confiável, adiciona automaticamente à ACL
-                print(f"Peer não confiável ({peer_ip}:{peer_port}) adicionado automaticamente à ACL")
+                print(f"Peer not trusted ({peer_ip}:{peer_port}) added to ACL")
                 self.trusted_peers.append(peer_fingerprint)
                 self.save_acl()
                 aes_key = self.receive_aes_key(conn)
                 peer = Peer(peer_ip, peer_port, conn, peer_certificate, aes_key)
                 self.peers[peer_ip] = peer
-                print(f"Peer Confiável Conectado: {peer_ip}:{peer_port}")
+                print(f"Trusted peer connected: {peer_ip}:{peer_port}")
                 threading.Thread(target=self.receive_messages, args=(peer,), daemon=True).start()
         except Exception as e:
-            print(f"Erro ao estabelecer conexão com {peer_ip}:{peer_port}: {e}")
+            print(f"Error establishing connection to {peer_ip}:{peer_port}: {e}")
             conn.close()
 
     def connect_to_peer(self):
@@ -255,7 +255,7 @@ class P2PChatApp:
 
         # Validação de entradas
         if not self.validate_ip(peer_ip) or not peer_port.isdigit():
-            messagebox.showerror("Erro", "IP ou porta inválidos!")
+            messagebox.showerror("Error", "Invalid IP or port!")
             return
 
         peer_port = int(peer_port)
@@ -292,7 +292,7 @@ class P2PChatApp:
                 threading.Thread(target=self.receive_messages, args=(peer,), daemon=True).start()
                 messagebox.showinfo("Conexão bem-sucedida", f"Conectado a {peer_ip}:{peer_port}")
             else:
-                print(f"Peer não confiável ({peer_ip}:{peer_port}) adicionado automaticamente à ACL")
+                print(f"Peer not trusted ({peer_ip}:{peer_port}) added to ACL")
                 self.trusted_peers.append(peer_fingerprint)
                 self.save_acl()
 
@@ -311,12 +311,12 @@ class P2PChatApp:
                 peer = Peer(peer_ip, peer_port, sock, peer_certificate, aes_key)
                 self.peers[peer_ip] = peer
                 threading.Thread(target=self.receive_messages, args=(peer,), daemon=True).start()
-                messagebox.showinfo("Conexão bem-sucedida", f"Conectado e confiável {peer_ip}:{peer_port}")
+                messagebox.showinfo("Connection well-established", f"Connected & trusted {peer_ip}:{peer_port}")
 
             self.setup_main_menu()
 
         except Exception as e:
-            messagebox.showerror("Erro de conexão", f"Não foi possível conectar a {peer_ip}:{peer_port}\nErro: {e}")
+            messagebox.showerror("Connection error", f"Not possible to connect to {peer_ip}:{peer_port}\nError: {e}")
 
     def validate_ip(self, ip):
         """
@@ -388,11 +388,11 @@ class P2PChatApp:
             try:
                 msg_length_bytes = peer.connection.recv(4)
                 if not msg_length_bytes:
-                    raise Exception("Conexão fechada pelo peer!")
+                    raise Exception("Connection closed by peer!")
                 msg_length = int.from_bytes(msg_length_bytes, byteorder='big')
                 encrypted_message = self.receive_exact(peer.connection, msg_length)
                 message = self.decrypt_message(encrypted_message, peer.aes_key)
-                print(f"Mensagem recebida de {peer.ip}:{peer.port}: {message}")
+                print(f"Message received from {peer.ip}:{peer.port}: {message}")
 
                 if peer.chat_window:
                     self.update_chat_window(peer, message, sender=False)
@@ -414,11 +414,11 @@ class P2PChatApp:
         self.current_frame = tk.Frame(self.root)
         self.current_frame.pack(pady=20)
 
-        label = tk.Label(self.current_frame, text="Peers Conectados")
+        label = tk.Label(self.current_frame, text="Peers conneceted")
         label.pack(pady=10)
 
         if not self.peers:
-            label = tk.Label(self.current_frame, text="Nenhum peer conectado")
+            label = tk.Label(self.current_frame, text="No peer connected")
             label.pack(pady=10)
         else:
             listbox = tk.Listbox(self.current_frame)
@@ -433,10 +433,10 @@ class P2PChatApp:
                     selected_peer = self.peers[selected_peer_ip]
                     self.open_chat_window(selected_peer)
 
-            open_chat_button = tk.Button(self.current_frame, text="Abrir Chat", command=open_chat)
+            open_chat_button = tk.Button(self.current_frame, text="Open Chat", command=open_chat)
             open_chat_button.pack(pady=10)
 
-        back_button = tk.Button(self.current_frame, text="Voltar", command=self.setup_main_menu)
+        back_button = tk.Button(self.current_frame, text="Back", command=self.setup_main_menu)
         back_button.pack(pady=10)
 
     def open_chat_window(self, peer):
@@ -448,7 +448,7 @@ class P2PChatApp:
             return
 
         chat_window = tk.Toplevel(self.root)
-        chat_window.title(f"Chat com {peer.ip}:{peer.port}")
+        chat_window.title(f"Chat with {peer.ip}:{peer.port}")
         chat_window.geometry("500x500")
 
         chat_text = tk.Text(chat_window, height=25, width=60, state=tk.DISABLED)
@@ -460,7 +460,7 @@ class P2PChatApp:
         message_entry = tk.Entry(chat_window, textvariable=message_var, width=50)
         message_entry.pack(pady=5, padx=10, fill=tk.X)
 
-        send_button = tk.Button(chat_window, text="Enviar", command=lambda: self.send_message(peer, message_var, chat_text))
+        send_button = tk.Button(chat_window, text="Send", command=lambda: self.send_message(peer, message_var, chat_text))
         send_button.pack(pady=5)
 
         message_entry.bind('<Return>', lambda event: self.send_message(peer, message_var, chat_text))
@@ -557,7 +557,7 @@ def start_peer():
     root = tk.Tk()
     root.withdraw()  # Oculta a janela principal para perguntar porta do servidor
 
-    local_port = simpledialog.askinteger("Porta", "Insira a porta local:")
+    local_port = simpledialog.askinteger("Port", "Insert local port:")
     root.destroy()
 
     if local_port:
@@ -568,7 +568,7 @@ def start_peer():
         app = P2PChatApp(host, local_port)
         app.root.mainloop()
     else:
-        messagebox.showerror("Erro", "Porta inválida! A aplicação será encerrada.")
+        messagebox.showerror("Error", "Invalid port! Application will now end.")
 
 if __name__ == "__main__":
     start_peer()
