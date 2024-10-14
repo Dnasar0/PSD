@@ -18,41 +18,15 @@ from cryptography import x509
 from cryptography.x509.oid import NameOID
 import datetime
 import secrets
-from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import dh
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 
 # Função para configurar a chave AES usando Diffie-Hellman
 def configure_aes_key(derived_key):
     # Derivar uma chave AES de 256 bits a partir da chave DH (normalmente 256 bits SHA-256)
     return derived_key[:32]  # Usar os primeiros 32 bytes como chave AES
-
-import hashlib
-
-from cryptography.hazmat.backends import default_backend
-
-from cryptography.hazmat.primitives import serialization, hashes
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography import x509
-from cryptography.x509.oid import NameOID
-import datetime
-import secrets
-
-
-# Função para configurar a chave AES usando Diffie-Hellman
-def configure_aes_key(derived_key):
-    # Derivar uma chave AES de 256 bits a partir da chave DH (normalmente 256 bits SHA-256)
-    return derived_key[:32]  # Usar os primeiros 32 bytes como chave AES
-
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives.asymmetric import dh
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-
 
 # Diretório para armazenar os certificados e chaves
 CERT_DIR = "certificates"
@@ -66,22 +40,27 @@ ACL_FILE = "trusted_peers.json"
 def perform_dh_key_exchange(peer_public_key, private_key):
     # Gerar a chave partilhada com o peer usando a chave pública e privada
     shared_key = private_key.exchange(peer_public_key)
+    
     # Derivar a chave final a partir da chave partilhada
     derived_key = hashlib.sha256(shared_key).digest()
-    return derived_key
+    aes_key = configure_aes_key(derived_key)
+    
+    return aes_key
 
-# Enviar a chave pública DH para o peer e receber a chave pública do peer
 def exchange_dh_keys(connection, private_key):
+    """
+    Exchange Diffie-Hellman public keys with the peer.
+    """
+    # Send our public key
     public_key = private_key.public_key()
-    # Serializar e enviar a chave pública para o peer
     public_key_bytes = public_key.public_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PublicFormat.SubjectPublicKeyInfo
     )
-    connection.send(public_key_bytes)
+    connection.sendall(public_key_bytes)
 
-    # Receber a chave pública do peer
-    peer_public_key_bytes = connection.recv(1024)
+    # Receive the peer's public key
+    peer_public_key_bytes = connection.recv(1024)  # Adjust buffer size if necessary
     peer_public_key = serialization.load_pem_public_key(peer_public_key_bytes, backend=default_backend())
 
     return peer_public_key
@@ -89,12 +68,14 @@ def exchange_dh_keys(connection, private_key):
 
 # Classe que representa um Peer conectado
 class Peer:
-    def __init__(self, ip, port, connection, certificate, aes_key):
+    def __init__(self, ip, port, connection, certificate, aes_key, dh_private_key=None, dh_public_key=None):
         self.ip = ip
         self.port = port
         self.connection = connection
         self.certificate = certificate  # Certificado x509 do peer
         self.aes_key = aes_key  # Chave AES para comunicação segura
+        self.dh_private_key = dh_private_key  # DH private key
+        self.dh_public_key = dh_public_key    # DH public key
         self.chat_window = None  # Janela de chat associada ao peer
 
 
@@ -123,7 +104,7 @@ class P2PChatApp:
         self.setup_main_menu()
 
         # Inicia o servidor numa nova thread para permitir a execução simultânea
-        threading.Thread(target=self.start_server, daemon=True).start()
+        threading.Thread(target=self.start_server, daemon=True).start() 
 
     def load_or_generate_certificate(self):
         """
@@ -284,29 +265,43 @@ class P2PChatApp:
             # Troca de certificados
             peer_cert_bytes = self.receive_all(conn)
             peer_certificate = x509.load_pem_x509_certificate(peer_cert_bytes, default_backend())
+            print("Recebe certificado")
 
             # Envia o próprio certificado
             conn.sendall(self.certificate_bytes)
+            print("Envia certificado")
 
-            # Verifica se o peer está na ACL
-            peer_fingerprint = peer_certificate.fingerprint(hashes.SHA256()).hex()
-            if peer_fingerprint in self.trusted_peers:
-                # Se for confiável, recebe a chave AES do peer
-                aes_key = self.receive_aes_key(conn)
-                peer = Peer(peer_ip, peer_port, conn, peer_certificate, aes_key)
-                self.peers[peer_ip] = peer
-                print(f"Peer Confiável Conectado: {peer_ip}:{peer_port}")
-                threading.Thread(target=self.receive_messages, args=(peer,), daemon=True).start()
-            else:
-                # Se não for confiável, adiciona automaticamente à ACL
-                print(f"Peer não confiável ({peer_ip}:{peer_port}) adicionado automaticamente à ACL")
-                self.trusted_peers.append(peer_fingerprint)
-                self.save_acl()
-                aes_key = self.receive_aes_key(conn)
-                peer = Peer(peer_ip, peer_port, conn, peer_certificate, aes_key)
-                self.peers[peer_ip] = peer
-                print(f"Peer Confiável Conectado: {peer_ip}:{peer_port}")
-                threading.Thread(target=self.receive_messages, args=(peer,), daemon=True).start()
+            # Receive peer's DH public key
+            peer_dh_public_key_bytes = self.receive_all(conn)  
+            peer_dh_public_key = serialization.load_pem_public_key(peer_dh_public_key_bytes, backend=default_backend())
+            
+            print(f"Received peer DH public key size: {len(peer_dh_public_key_bytes)} bytes") 
+            
+            parameters = dh.generate_parameters(generator=2, key_size=2048, backend=default_backend())
+            dh_private_key = parameters.generate_private_key()
+            dh_public_key = dh_private_key.public_key()            
+            
+            print("Gera par chaves")            
+
+            # Send DH public key to peer
+            dh_public_key_bytes = dh_public_key.public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo
+            )
+            conn.sendall(dh_public_key_bytes)
+            print(f"Sent DH public key size: {len(dh_public_key_bytes)} bytes")      
+
+            # Derive AES key from shared DH key
+            shared_key = dh_private_key.exchange(peer_dh_public_key)
+            print("Cria shared key")
+            aes_key = hashlib.sha256(shared_key).digest()[:32]
+
+            peer = Peer(peer_ip, peer_port, conn, peer_certificate, aes_key, dh_private_key)
+            self.peers[peer_ip] = peer
+            print(f"Peer confiável conectado: {peer_ip}:{peer_port}")
+            threading.Thread(target=self.receive_messages, args=(peer,), daemon=True).start()
+            
+        
         except Exception as e:
             print(f"Erro ao estabelecer conexão com {peer_ip}:{peer_port}: {e}")
             conn.close()
@@ -331,52 +326,45 @@ class P2PChatApp:
 
             # Envia o próprio certificado
             sock.sendall(self.certificate_bytes)
+            print("Envia certificado")
 
             # Recebe o certificado do peer
             peer_cert_bytes = self.receive_all(sock)
             peer_certificate = x509.load_pem_x509_certificate(peer_cert_bytes, default_backend())
+            print("Recebe certificado")
+            
+            parameters = dh.generate_parameters(generator=2, key_size=2048, backend=default_backend())
+            dh_private_key = parameters.generate_private_key()
+            dh_public_key = dh_private_key.public_key() 
+            
+            print("Gera par chaves")            
 
-            # Verifica se o peer está na ACL
-            peer_fingerprint = peer_certificate.fingerprint(hashes.SHA256()).hex()
-            if peer_fingerprint in self.trusted_peers:
-                # Peer confiável, envia a chave AES ao servidor
-                aes_key = self.generate_aes_key()
-                encrypted_aes_key = peer_certificate.public_key().encrypt(
-                    aes_key,
-                    padding.OAEP(
-                        mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                        algorithm=hashes.SHA256(),
-                        label=None
-                    )
-                )
-                sock.sendall(len(encrypted_aes_key).to_bytes(4, byteorder='big'))
-                sock.sendall(encrypted_aes_key)
+            # Send the public DH key to the peer
+            dh_public_key_bytes = dh_public_key.public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo
+            )
+            sock.sendall(dh_public_key_bytes)
+            
+            # After sending DH public key
+            print(f"Sent DH public key size: {len(dh_public_key_bytes)} bytes")
 
-                peer = Peer(peer_ip, peer_port, sock, peer_certificate, aes_key)
-                self.peers[peer_ip] = peer
-                threading.Thread(target=self.receive_messages, args=(peer,), daemon=True).start()
-                messagebox.showinfo("Conexão bem-sucedida", f"Conectado a {peer_ip}:{peer_port}")
-            else:
-                print(f"Peer não confiável ({peer_ip}:{peer_port}) adicionado automaticamente à ACL")
-                self.trusted_peers.append(peer_fingerprint)
-                self.save_acl()
+            # Receive the peer's DH public key
+            peer_dh_public_key_bytes = self.receive_all(sock)
 
-                aes_key = self.generate_aes_key()
-                encrypted_aes_key = peer_certificate.public_key().encrypt(
-                    aes_key,
-                    padding.OAEP(
-                        mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                        algorithm=hashes.SHA256(),
-                        label=None
-                    )
-                )
-                sock.sendall(len(encrypted_aes_key).to_bytes(4, byteorder='big'))
-                sock.sendall(encrypted_aes_key)
+            print(f"Received peer DH public key size: {len(peer_dh_public_key_bytes)} bytes")            
 
-                peer = Peer(peer_ip, peer_port, sock, peer_certificate, aes_key)
-                self.peers[peer_ip] = peer
-                threading.Thread(target=self.receive_messages, args=(peer,), daemon=True).start()
-                messagebox.showinfo("Conexão bem-sucedida", f"Conectado e confiável {peer_ip}:{peer_port}")
+            peer_dh_public_key = serialization.load_pem_public_key(peer_dh_public_key_bytes, backend=default_backend())
+
+            # Perform key exchange and derive shared AES key
+            shared_key = dh_private_key.exchange(peer_dh_public_key)
+            print("Cria shared key")
+            aes_key = hashlib.sha256(shared_key).digest()[:32]  # Derive AES key from shared secret
+
+            peer = Peer(peer_ip, peer_port, sock, peer_certificate, aes_key)
+            self.peers[peer_ip] = peer
+            threading.Thread(target=self.receive_messages, args=(peer,), daemon=True).start()
+            messagebox.showinfo("Conexão bem-sucedida", f"Conectado e confiável {peer_ip}:{peer_port}")
 
             self.setup_main_menu()
 
