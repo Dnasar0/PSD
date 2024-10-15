@@ -18,7 +18,7 @@ from cryptography import x509
 from cryptography.x509.oid import NameOID
 import datetime
 import secrets
-from cryptography.hazmat.primitives.asymmetric import dh
+from cryptography.hazmat.primitives.asymmetric import dh,ec
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 
@@ -66,10 +66,10 @@ def exchange_dh_keys(connection, private_key):
     return peer_public_key
 
 def generate_key_pair():
-        parameters = dh.generate_parameters(generator=2, key_size=2048, backend=default_backend())
-        dh_private_key = parameters.generate_private_key()
-        dh_public_key = parameters.generate_private_key().public_key()
-        return dh_public_key, dh_private_key  
+
+        dh_private_key = ec.generate_private_key(ec.SECP256R1(), default_backend())
+
+        return dh_private_key.public_key(), dh_private_key  
 
 
 # Classe que representa um Peer conectado
@@ -287,10 +287,8 @@ class P2PChatApp:
             )   
             conn.sendall(dh_public_key_bytes)
             print(f"Sent DH public key size: {len(dh_public_key_bytes)} bytes")      
-
-            # Derive AES key from shared DH key
-            shared_key = self.dh_private_key.exchange(peer_dh_public_key)
-            print("Cria shared key")
+            
+            shared_key = self.dh_private_key.exchange(ec.ECDH(), peer_dh_public_key)
             aes_key = configure_aes_key(shared_key)
 
             peer = Peer(peer_ip, peer_port, conn, peer_certificate, aes_key, self.dh_private_key)
@@ -349,9 +347,8 @@ class P2PChatApp:
 
             peer_dh_public_key = serialization.load_pem_public_key(peer_dh_public_key_bytes, backend=default_backend())
 
-            # Perform key exchange and derive shared AES key
-            shared_key = self.dh_private_key.exchange(peer_dh_public_key)
-            print("Cria shared key")
+            shared_key = self.dh_private_key.exchange(ec.ECDH(), peer_dh_public_key)
+                        
             aes_key = configure_aes_key(shared_key)
 
             peer = Peer(peer_ip, peer_port, sock, peer_certificate, aes_key)
@@ -532,6 +529,7 @@ class P2PChatApp:
                 msg_length = len(encrypted_message)
                 peer.connection.sendall(msg_length.to_bytes(4, byteorder='big'))
                 peer.connection.sendall(encrypted_message)
+                print("Sent message")
 
                 self.update_chat_window(peer, message, sender=True)
                 self.save_chat_to_file(peer, f"Você: {message}")
