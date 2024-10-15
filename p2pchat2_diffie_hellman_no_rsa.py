@@ -20,7 +20,6 @@ import datetime
 import secrets
 from cryptography.hazmat.primitives.asymmetric import dh
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from cryptography.hazmat.primitives import hashes
 
 
 # Função para configurar a chave AES usando Diffie-Hellman
@@ -64,6 +63,12 @@ def exchange_dh_keys(connection, private_key):
     peer_public_key = serialization.load_pem_public_key(peer_public_key_bytes, backend=default_backend())
 
     return peer_public_key
+
+def generate_key_pair():
+        parameters = dh.generate_parameters(generator=2, key_size=2048, backend=default_backend())
+        dh_private_key = parameters.generate_private_key()
+        dh_public_key = parameters.generate_private_key().public_key()
+        return dh_public_key, dh_private_key  
 
 
 # Classe que representa um Peer conectado
@@ -277,17 +282,13 @@ class P2PChatApp:
             
             print(f"Received peer DH public key size: {len(peer_dh_public_key_bytes)} bytes") 
             
-            parameters = dh.generate_parameters(generator=2, key_size=2048, backend=default_backend())
-            dh_private_key = parameters.generate_private_key()
-            dh_public_key = dh_private_key.public_key()            
-            
-            print("Gera par chaves")            
+            dh_public_key, dh_private_key = generate_key_pair()
 
             # Send DH public key to peer
             dh_public_key_bytes = dh_public_key.public_bytes(
                 encoding=serialization.Encoding.PEM,
                 format=serialization.PublicFormat.SubjectPublicKeyInfo
-            )
+            )   
             conn.sendall(dh_public_key_bytes)
             print(f"Sent DH public key size: {len(dh_public_key_bytes)} bytes")      
 
@@ -333,11 +334,7 @@ class P2PChatApp:
             peer_certificate = x509.load_pem_x509_certificate(peer_cert_bytes, default_backend())
             print("Recebe certificado")
             
-            parameters = dh.generate_parameters(generator=2, key_size=2048, backend=default_backend())
-            dh_private_key = parameters.generate_private_key()
-            dh_public_key = dh_private_key.public_key() 
-            
-            print("Gera par chaves")            
+            dh_public_key, dh_private_key = generate_key_pair()                            
 
             # Send the public DH key to the peer
             dh_public_key_bytes = dh_public_key.public_bytes(
