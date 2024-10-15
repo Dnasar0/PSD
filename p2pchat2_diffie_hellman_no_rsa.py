@@ -22,11 +22,6 @@ from cryptography.hazmat.primitives.asymmetric import dh
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 
-# Função para configurar a chave AES usando Diffie-Hellman
-def configure_aes_key(derived_key):
-    # Derivar uma chave AES de 256 bits a partir da chave DH (normalmente 256 bits SHA-256)
-    return derived_key[:32]  # Usar os primeiros 32 bytes como chave AES
-
 # Diretório para armazenar os certificados e chaves
 CERT_DIR = "certificates"
 if not os.path.exists(CERT_DIR):
@@ -34,6 +29,12 @@ if not os.path.exists(CERT_DIR):
 
 # Caminho para o ficheiro ACL que armazena os peers confiáveis
 ACL_FILE = "trusted_peers.json"
+
+
+def configure_aes_key(shared_key):
+    # Derivar uma chave AES de 256 bits a partir da shared key
+    aes_key = hashlib.sha256(shared_key).digest()[:32]  # Usar os primeiros 32 bytes como chave AES
+    return aes_key
 
 # Função para realizar a troca de chaves Diffie-Hellman
 def perform_dh_key_exchange(peer_public_key, private_key):
@@ -113,7 +114,7 @@ class P2PChatApp:
 
     def load_or_generate_certificate(self):
         """
-        Carrega ou gera um par de chaves RSA e um certificado autoassinado.
+        Carrega ou gera um par de chaves DH e um certificado autoassinado.
         """
         cert_path = os.path.join(CERT_DIR, f"peer_{self.port}.pem")
         key_path = os.path.join(CERT_DIR, f"peer_{self.port}_key.pem")
@@ -130,13 +131,8 @@ class P2PChatApp:
                 certificate = x509.load_pem_x509_certificate(cert_file.read(), default_backend())
             return private_key, certificate
         else:
-            # Gera um novo par de chaves RSA
-            private_key = rsa.generate_private_key(
-                public_exponent=65537,
-                key_size=2048,
-                backend=default_backend()
-            )
-            public_key = private_key.public_key()
+            
+            public_key, private_key = generate_key_pair()
 
             # Gera um certificado autoassinado para o peer
             subject = issuer = x509.Name([
@@ -282,10 +278,10 @@ class P2PChatApp:
             
             print(f"Received peer DH public key size: {len(peer_dh_public_key_bytes)} bytes") 
             
-            dh_public_key, dh_private_key = generate_key_pair()
+            self.dh_public_key, self.dh_private_key = generate_key_pair()
 
             # Send DH public key to peer
-            dh_public_key_bytes = dh_public_key.public_bytes(
+            dh_public_key_bytes = self.dh_public_key.public_bytes(
                 encoding=serialization.Encoding.PEM,
                 format=serialization.PublicFormat.SubjectPublicKeyInfo
             )   
@@ -293,11 +289,11 @@ class P2PChatApp:
             print(f"Sent DH public key size: {len(dh_public_key_bytes)} bytes")      
 
             # Derive AES key from shared DH key
-            shared_key = dh_private_key.exchange(peer_dh_public_key)
+            shared_key = self.dh_private_key.exchange(peer_dh_public_key)
             print("Cria shared key")
-            aes_key = hashlib.sha256(shared_key).digest()[:32]
+            aes_key = configure_aes_key(shared_key)
 
-            peer = Peer(peer_ip, peer_port, conn, peer_certificate, aes_key, dh_private_key)
+            peer = Peer(peer_ip, peer_port, conn, peer_certificate, aes_key, self.dh_private_key)
             self.peers[peer_ip] = peer
             print(f"Peer confiável conectado: {peer_ip}:{peer_port}")
             threading.Thread(target=self.receive_messages, args=(peer,), daemon=True).start()
@@ -334,10 +330,10 @@ class P2PChatApp:
             peer_certificate = x509.load_pem_x509_certificate(peer_cert_bytes, default_backend())
             print("Recebe certificado")
             
-            dh_public_key, dh_private_key = generate_key_pair()                            
+            self.dh_public_key, self.dh_private_key = generate_key_pair()                            
 
             # Send the public DH key to the peer
-            dh_public_key_bytes = dh_public_key.public_bytes(
+            dh_public_key_bytes = self.dh_public_key.public_bytes(
                 encoding=serialization.Encoding.PEM,
                 format=serialization.PublicFormat.SubjectPublicKeyInfo
             )
@@ -354,9 +350,9 @@ class P2PChatApp:
             peer_dh_public_key = serialization.load_pem_public_key(peer_dh_public_key_bytes, backend=default_backend())
 
             # Perform key exchange and derive shared AES key
-            shared_key = dh_private_key.exchange(peer_dh_public_key)
+            shared_key = self.dh_private_key.exchange(peer_dh_public_key)
             print("Cria shared key")
-            aes_key = hashlib.sha256(shared_key).digest()[:32]  # Derive AES key from shared secret
+            aes_key = configure_aes_key(shared_key)
 
             peer = Peer(peer_ip, peer_port, sock, peer_certificate, aes_key)
             self.peers[peer_ip] = peer
@@ -412,7 +408,7 @@ class P2PChatApp:
 
     def decrypt_aes_key(self, encrypted_aes_key):
         """
-        Desencripta a chave AES usando a chave privada RSA.
+        Desencripta a chave AES usando a chave privada DH.
         """
         decrypted_aes_key = self.private_key.decrypt(
             encrypted_aes_key,
