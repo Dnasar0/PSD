@@ -11,16 +11,14 @@ import secrets
 import hashlib
 
 from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives.asymmetric import rsa, padding
+from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 import datetime
 import secrets
-from cryptography.hazmat.primitives.asymmetric import dh,ec
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-
+from cryptography.hazmat.primitives.asymmetric import ec
 
 # Diretório para armazenar os certificados e chaves
 CERT_DIR = "certificates"
@@ -352,15 +350,6 @@ class P2PChatApp:
                 break
         return data
 
-    def receive_aes_key(self, conn):
-        """
-        Recebe e desencripta a chave AES enviada pelo peer.
-        """
-        encrypted_aes_key_length_bytes = self.receive_exact(conn, 4)
-        encrypted_aes_key_length = int.from_bytes(encrypted_aes_key_length_bytes, byteorder='big')
-        encrypted_aes_key = self.receive_exact(conn, encrypted_aes_key_length)
-        return self.decrypt_aes_key(encrypted_aes_key)
-
     def receive_exact(self, conn, num_bytes):
         """
         Recebe exatamente o número de bytes especificado da conexão.
@@ -386,12 +375,6 @@ class P2PChatApp:
             )
         )
         return decrypted_aes_key
-
-    def generate_aes_key(self):
-        """
-        Gera uma chave AES de 256 bits.
-        """
-        return secrets.token_bytes(32)
 
     def receive_messages(self, peer):
         """
