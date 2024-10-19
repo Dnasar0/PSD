@@ -36,41 +36,11 @@ def configure_aes_key(shared_key):
     aes_key = hashlib.sha256(shared_key).digest()[:32]  # Usar os primeiros 32 bytes como chave AES
     return aes_key
 
-# Função para realizar a troca de chaves Diffie-Hellman
-def perform_dh_key_exchange(peer_public_key, private_key):
-    # Gerar a chave partilhada com o peer usando a chave pública e privada
-    shared_key = private_key.exchange(peer_public_key)
-    
-    # Derivar a chave final a partir da chave partilhada
-    derived_key = hashlib.sha256(shared_key).digest()
-    aes_key = configure_aes_key(derived_key)
-    
-    return aes_key
-
-def exchange_dh_keys(connection, private_key):
-    """
-    Exchange Diffie-Hellman public keys with the peer.
-    """
-    # Send our public key
-    public_key = private_key.public_key()
-    public_key_bytes = public_key.public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo
-    )
-    connection.sendall(public_key_bytes)
-
-    # Receive the peer's public key
-    peer_public_key_bytes = connection.recv(1024)  # Adjust buffer size if necessary
-    peer_public_key = serialization.load_pem_public_key(peer_public_key_bytes, backend=default_backend())
-
-    return peer_public_key
-
 def generate_key_pair():
 
         dh_private_key = ec.generate_private_key(ec.SECP256R1(), default_backend())
 
         return dh_private_key.public_key(), dh_private_key  
-
 
 # Classe que representa um Peer conectado
 class Peer:
