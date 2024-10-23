@@ -30,8 +30,8 @@ ACL_FILE = "trusted_peers.json"
 
 
 def configure_aes_key(shared_key):
-    # Derivar uma chave AES de 256 bits a partir da shared key
-    aes_key = hashlib.sha256(shared_key).digest()[:32]  # Usar os primeiros 32 bytes como chave AES
+    # Deriva uma chave AES de 256 bits a partir da shared key
+    aes_key = hashlib.sha256(shared_key).digest()[:32]  # Usa os primeiros 32 bytes como chave AES
     return aes_key
 
 def generate_key_pair():
@@ -40,7 +40,7 @@ def generate_key_pair():
 
         return dh_private_key.public_key(), dh_private_key  
 
-# Classe que representa um Peer conectado
+# Classe de Peer ligado
 class Peer:
     def __init__(self, ip, port, connection, certificate, aes_key, dh_private_key=None, dh_public_key=None):
         self.ip = ip
@@ -58,10 +58,10 @@ class P2PChatApp:
     def __init__(self, host, port):
         self.host = host
         self.port = port
-        self.peers = {}  # Dicionário para armazenar os peers conectados
+        self.peers = {}  # Dicionário para armazenar os peers ligados
         self.server_socket = None  # Socket do servidor
 
-        # Carrega ou gera o par de chaves e o certificado
+        # Carrega/gera o par de chaves e o certificado
         self.private_key, self.certificate = self.load_or_generate_certificate()
         self.certificate_bytes = self.certificate.public_bytes(serialization.Encoding.PEM)
 
@@ -124,7 +124,7 @@ class P2PChatApp:
                 critical=False
             ).sign(private_key, hashes.SHA256(), default_backend())
 
-            # Salva as chaves e o certificado
+            # Guarda as chaves e o certificado
             with open(key_path, "wb") as key_file:
                 key_file.write(private_key.private_bytes(
                     encoding=serialization.Encoding.PEM,
@@ -148,7 +148,7 @@ class P2PChatApp:
 
     def save_acl(self):
         """
-        Salva a lista de peers confiáveis no ficheiro ACL.
+        Guarda a lista de peers confiáveis no ficheiro ACL.
         """
         with open(ACL_FILE, "w") as f:
             json.dump(self.trusted_peers, f, indent=4)
@@ -174,7 +174,7 @@ class P2PChatApp:
 
     def show_connection_inputs(self):
         """
-        Mostra os campos de entrada para conectar a um novo peer.
+        Mostra os campos de entrada para ligar a um novo peer.
         """
         self.clear_frame()
 
@@ -194,7 +194,7 @@ class P2PChatApp:
 
     def clear_frame(self):
         """
-        Limpa o frame atual para carregar novos widgets.
+        Limpa o frame atual para carregar os novos widgets.
         """
         for widget in self.current_frame.winfo_children():
             widget.destroy()
@@ -234,27 +234,21 @@ class P2PChatApp:
             # Troca de certificados
             peer_cert_bytes = self.receive_all(conn)
             peer_certificate = x509.load_pem_x509_certificate(peer_cert_bytes, default_backend())
-            print("Receive certificate")
 
             # Envia o próprio certificado
             conn.sendall(self.certificate_bytes)
-            print("Send certificate")
-
-            # Receive peer's DH public key
+            # Recebe a chave publica ECDH do outro peer
             peer_dh_public_key_bytes = self.receive_all(conn)  
             peer_dh_public_key = serialization.load_pem_public_key(peer_dh_public_key_bytes, backend=default_backend())
             
-            print(f"Received peer DH public key size: {len(peer_dh_public_key_bytes)} bytes") 
-            
             self.dh_public_key, self.dh_private_key = generate_key_pair()
 
-            # Send DH public key to peer
+            # Envia a chave pública ECDH do outro peer
             dh_public_key_bytes = self.dh_public_key.public_bytes(
                 encoding=serialization.Encoding.PEM,
                 format=serialization.PublicFormat.SubjectPublicKeyInfo
             )   
-            conn.sendall(dh_public_key_bytes)
-            print(f"Sent DH public key size: {len(dh_public_key_bytes)} bytes")      
+            conn.sendall(dh_public_key_bytes)     
             
             shared_key = self.dh_private_key.exchange(ec.ECDH(), peer_dh_public_key)
             aes_key = configure_aes_key(shared_key)
@@ -276,7 +270,7 @@ class P2PChatApp:
         peer_ip = self.peer_ip_entry.get()
         peer_port = self.peer_port_entry.get()
 
-        # Validação de entradas
+        # Validação do ip
         if not self.validate_ip(peer_ip) or not peer_port.isdigit():
             messagebox.showerror("Error", "Invalid IP or port!")
             return
@@ -289,29 +283,22 @@ class P2PChatApp:
 
             # Envia o próprio certificado
             sock.sendall(self.certificate_bytes)
-            print("Send certificate")
 
             # Recebe o certificado do peer
             peer_cert_bytes = self.receive_all(sock)
             peer_certificate = x509.load_pem_x509_certificate(peer_cert_bytes, default_backend())
-            print("Receive certificate")
             
             self.dh_public_key, self.dh_private_key = generate_key_pair()                            
 
-            # Send the public DH key to the peer
+            # Envia a chave pública ECDH ao outro peer
             dh_public_key_bytes = self.dh_public_key.public_bytes(
                 encoding=serialization.Encoding.PEM,
                 format=serialization.PublicFormat.SubjectPublicKeyInfo
             )
             sock.sendall(dh_public_key_bytes)
-            
-            # After sending DH public key
-            print(f"Sent DH public key size: {len(dh_public_key_bytes)} bytes")
 
-            # Receive the peer's DH public key
-            peer_dh_public_key_bytes = self.receive_all(sock)
-
-            print(f"Received peer DH public key size: {len(peer_dh_public_key_bytes)} bytes")            
+            # Recebe a chave pública ECDH do outro peer
+            peer_dh_public_key_bytes = self.receive_all(sock)            
 
             peer_dh_public_key = serialization.load_pem_public_key(peer_dh_public_key_bytes, backend=default_backend())
 
@@ -331,14 +318,14 @@ class P2PChatApp:
 
     def validate_ip(self, ip):
         """
-        Valida se o IP fornecido é válido.
+        Função secundária que verifica se o IP fornecido é válido.
         """
         parts = ip.split(".")
         return len(parts) == 4 and all(part.isdigit() and 0 <= int(part) <= 255 for part in parts)
 
     def receive_all(self, conn):
         """
-        Recebe todos os dados da conexão até que não haja mais.
+        Função secundária que recebe todos os dados conexão.
         """
         data = b''
         while True:
@@ -352,7 +339,7 @@ class P2PChatApp:
 
     def receive_exact(self, conn, num_bytes):
         """
-        Recebe exatamente o número de bytes especificado da conexão.
+        Função secundária que recebe exatamente o número de bytes especificado da conexão.
         """
         data = b''
         while len(data) < num_bytes:
@@ -364,7 +351,7 @@ class P2PChatApp:
 
     def decrypt_aes_key(self, encrypted_aes_key):
         """
-        Desencripta a chave AES usando a chave privada DH.
+        Desencripta a chave AES usando a chave privada ECDH.
         """
         decrypted_aes_key = self.private_key.decrypt(
             encrypted_aes_key,
@@ -378,7 +365,7 @@ class P2PChatApp:
 
     def receive_messages(self, peer):
         """
-        Recebe mensagens do peer e atualiza a interface de chat.
+        Recebe mensagens do peer e atualiza a interface do chat.
         """
         while True:
             try:
@@ -388,7 +375,6 @@ class P2PChatApp:
                 msg_length = int.from_bytes(msg_length_bytes, byteorder='big')
                 encrypted_message = self.receive_exact(peer.connection, msg_length)
                 message = self.decrypt_message(encrypted_message, peer.aes_key)
-                print(f"Message received from {peer.ip}:{peer.port}: {message}")
 
                 if peer.chat_window:
                     self.update_chat_window(peer, message, sender=False)
@@ -482,7 +468,6 @@ class P2PChatApp:
                 msg_length = len(encrypted_message)
                 peer.connection.sendall(msg_length.to_bytes(4, byteorder='big'))
                 peer.connection.sendall(encrypted_message)
-                print("Sent message")
 
                 self.update_chat_window(peer, message, sender=True)
                 self.save_chat_to_file(peer, f"You: {message}")
