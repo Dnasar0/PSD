@@ -8,6 +8,8 @@ import json
 import hashlib
 import datetime
 import secrets
+import Peer
+import Tk
 
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import rsa, padding, ec
@@ -15,6 +17,7 @@ from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography import x509
 from cryptography.x509.oid import NameOID
+
 
 # Directory to store certificates and keys
 CERT_DIR = "certificates"
@@ -35,18 +38,6 @@ def generate_key_pair():
     dh_private_key = ec.generate_private_key(ec.SECP256R1(), default_backend())
     return dh_private_key.public_key(), dh_private_key
 
-# Class representing a connected Peer
-class Peer:
-    def __init__(self, ip, port, connection, certificate, aes_key, dh_private_key=None, dh_public_key=None):
-        self.ip = ip
-        self.port = port
-        self.connection = connection
-        self.certificate = certificate  # x509 certificate of the peer
-        self.aes_key = aes_key  # AES key for secure communication
-        self.dh_private_key = dh_private_key  # DH private key
-        self.dh_public_key = dh_public_key    # DH public key
-        self.chat_window = None  # Chat window associated with the peer
-
 # Main P2P Chat Application class
 class P2PChatApp:
     def __init__(self, host, port):
@@ -63,13 +54,15 @@ class P2PChatApp:
         self.trusted_peers = self.load_acl()
 
         # Initialize the GUI
-        self.root = tk.Tk()
-        self.root.title(f"Client/Server: {host}:{port}")
-        self.root.geometry("500x500")
-        self.root.minsize(500, 500)
-
-        self.current_frame = None
-        self.setup_main_menu()
+        self.T = Tk.Tk(self, host, port)
+        self.root = self.T.get_root()
+        #self.root = tk.Tk()
+        #self.root.title(f"Client/Server: {host}:{port}")
+        #self.root.geometry("500x500")
+        #self.root.minsize(500, 500)
+#
+        #self.current_frame = None
+        #self.setup_main_menu()
 
         # Start the server in a new thread to allow simultaneous execution
         threading.Thread(target=self.start_server, daemon=True).start()
@@ -146,51 +139,51 @@ class P2PChatApp:
         with open(ACL_FILE, "w") as f:
             json.dump(self.trusted_peers, f, indent=4)
 
-    def setup_main_menu(self):
-        """
-        Sets up the main menu of the GUI.
-        """
-        if self.current_frame:
-            self.current_frame.destroy()
+    #def setup_main_menu(self):
+    #    """
+    #    Sets up the main menu of the GUI.
+    #    """
+    #    if self.current_frame:
+    #        self.current_frame.destroy()
+#
+    #    self.current_frame = tk.Frame(self.root)
+    #    self.current_frame.pack(pady=20)
+#
+    #    self.info_label = tk.Label(self.current_frame, text=f"Your IP: {self.host}\nYour Port: {self.port}")
+    #    self.info_label.pack(pady=10)
+#
+    #    self.connect_button = tk.Button(self.current_frame, text="Connect to a peer", command=self.show_connection_inputs)
+    #    self.connect_button.pack(pady=10)
+#
+    #    self.list_button = tk.Button(self.current_frame, text="Peers List", command=self.show_peer_list)
+    #    self.list_button.pack(pady=10)
 
-        self.current_frame = tk.Frame(self.root)
-        self.current_frame.pack(pady=20)
+    #def show_connection_inputs(self):
+    #    """
+    #    Displays the input fields to connect to a new peer.
+    #    """
+    #    self.clear_frame()
+#
+    #    tk.Label(self.current_frame, text="Peer IP:").pack(pady=5)
+    #    self.peer_ip_entry = tk.Entry(self.current_frame)
+    #    self.peer_ip_entry.pack(pady=5)
+#
+    #    tk.Label(self.current_frame, text="Peer Port:").pack(pady=5)
+    #    self.peer_port_entry = tk.Entry(self.current_frame)
+    #    self.peer_port_entry.pack(pady=5)
+#
+    #    self.connect_peer_button = tk.Button(self.current_frame, text="Connect", command=self.connect_to_peer)
+    #    self.connect_peer_button.pack(pady=10)
+#
+    #    back_button = tk.Button(self.current_frame, text="Back", command=self.setup_main_menu)
+    #    back_button.pack(pady=10)
 
-        self.info_label = tk.Label(self.current_frame, text=f"Your IP: {self.host}\nYour Port: {self.port}")
-        self.info_label.pack(pady=10)
-
-        self.connect_button = tk.Button(self.current_frame, text="Connect to a peer", command=self.show_connection_inputs)
-        self.connect_button.pack(pady=10)
-
-        self.list_button = tk.Button(self.current_frame, text="Peers List", command=self.show_peer_list)
-        self.list_button.pack(pady=10)
-
-    def show_connection_inputs(self):
-        """
-        Displays the input fields to connect to a new peer.
-        """
-        self.clear_frame()
-
-        tk.Label(self.current_frame, text="Peer IP:").pack(pady=5)
-        self.peer_ip_entry = tk.Entry(self.current_frame)
-        self.peer_ip_entry.pack(pady=5)
-
-        tk.Label(self.current_frame, text="Peer Port:").pack(pady=5)
-        self.peer_port_entry = tk.Entry(self.current_frame)
-        self.peer_port_entry.pack(pady=5)
-
-        self.connect_peer_button = tk.Button(self.current_frame, text="Connect", command=self.connect_to_peer)
-        self.connect_peer_button.pack(pady=10)
-
-        back_button = tk.Button(self.current_frame, text="Back", command=self.setup_main_menu)
-        back_button.pack(pady=10)
-
-    def clear_frame(self):
-        """
-        Clears the current frame to load new widgets.
-        """
-        for widget in self.current_frame.winfo_children():
-            widget.destroy()
+    #def clear_frame(self):
+    #    """
+    #    Clears the current frame to load new widgets.
+    #    """
+    #    for widget in self.current_frame.winfo_children():
+    #        widget.destroy()
 
     def start_server(self):
         """
@@ -265,8 +258,7 @@ class P2PChatApp:
             msg_length = len(encrypted_port)
             conn.sendall(msg_length.to_bytes(4, byteorder='big'))
             conn.sendall(encrypted_port)
-
-            peer = Peer(peer_ip, peer_listening_port, conn, peer_certificate, aes_key, self.dh_private_key)
+            peer = Peer.Peer(peer_ip, peer_listening_port, conn, peer_certificate, aes_key, self.dh_private_key)
             self.peers[(peer_ip, peer_listening_port)] = peer  # Use tuple as key
             print(f"Trusted Peer Connected: {peer_ip}:{peer_listening_port}")
             threading.Thread(target=self.receive_messages, args=(peer,), daemon=True).start()
@@ -279,8 +271,8 @@ class P2PChatApp:
         """
         Connects to a remote peer using user-provided IP and port.
         """
-        peer_ip = self.peer_ip_entry.get()
-        peer_port = self.peer_port_entry.get()
+        peer_ip = self.T.peer_ip_entry.get()
+        peer_port = self.T.peer_port_entry.get()
 
         # Input validation
         if not self.validate_ip(peer_ip) or not peer_port.isdigit():
@@ -339,12 +331,12 @@ class P2PChatApp:
             encrypted_port = self.receive_exact(sock, msg_length)
             peer_listening_port = int(self.decrypt_message(encrypted_port, aes_key))
 
-            peer = Peer(peer_ip, peer_listening_port, sock, peer_certificate, aes_key)
+            peer = Peer.Peer(peer_ip, peer_listening_port, sock, peer_certificate, aes_key)
             self.peers[(peer_ip, peer_listening_port)] = peer  # Use tuple as key
             threading.Thread(target=self.receive_messages, args=(peer,), daemon=True).start()
             messagebox.showinfo("Connection well-established", f"Connected & trusted {peer_ip}:{peer_listening_port}")
 
-            self.setup_main_menu()
+            self.T.setup_main_menu()
 
         except Exception as e:
             messagebox.showerror("Connection Error", f"Could not connect to {peer_ip}:{peer_port}\nError: {e}")
@@ -397,7 +389,7 @@ class P2PChatApp:
                 print(f"Message received from {peer.ip}:{peer.port}: {message}")
 
                 if peer.chat_window:
-                    self.update_chat_window(peer, message, sender=False)
+                    self.T.update_chat_window(peer, message, sender=False)
                 self.save_chat_to_file(peer, f"{peer.ip}:{peer.port}: {message}")
 
             except Exception as e:
@@ -406,76 +398,76 @@ class P2PChatApp:
                 del self.peers[(peer.ip, peer.port)]  # Use tuple as key
                 break
 
-    def show_peer_list(self):
-        """
-        Displays the list of connected peers.
-        """
-        if self.current_frame:
-            self.current_frame.destroy()
+    #def show_peer_list(self):
+    #    """
+    #    Displays the list of connected peers.
+    #    """
+    #    if self.current_frame:
+    #        self.current_frame.destroy()
+#
+    #    self.current_frame = tk.Frame(self.root)
+    #    self.current_frame.pack(pady=20)
+#
+    #    label = tk.Label(self.current_frame, text="Connected Peers")
+    #    label.pack(pady=10)
+#
+    #    if not self.peers:
+    #        label = tk.Label(self.current_frame, text="No peer connected")
+    #        label.pack(pady=10)
+    #    else:
+    #        listbox = tk.Listbox(self.current_frame)
+    #        for idx, (peer_ip, peer_port) in enumerate(self.peers):
+    #            listbox.insert(idx, f"{peer_ip}:{peer_port}")
+    #        listbox.pack(pady=10)
+#
+    #        def open_chat():
+    #            selected_idx = listbox.curselection()
+    #            if selected_idx:
+    #                selected_item = listbox.get(selected_idx[0])
+    #                selected_peer_ip, selected_peer_port = selected_item.split(':')
+    #                selected_peer_port = int(selected_peer_port)
+    #                selected_peer = self.peers[(selected_peer_ip, selected_peer_port)]
+    #                self.open_chat_window(selected_peer)
+#
+    #        open_chat_button = tk.Button(self.current_frame, text="Open Chat", command=open_chat)
+    #        open_chat_button.pack(pady=10)
+#
+    #    back_button = tk.Button(self.current_frame, text="Back", command=self.setup_main_menu)
+    #    back_button.pack(pady=10)
 
-        self.current_frame = tk.Frame(self.root)
-        self.current_frame.pack(pady=20)
-
-        label = tk.Label(self.current_frame, text="Connected Peers")
-        label.pack(pady=10)
-
-        if not self.peers:
-            label = tk.Label(self.current_frame, text="No peer connected")
-            label.pack(pady=10)
-        else:
-            listbox = tk.Listbox(self.current_frame)
-            for idx, (peer_ip, peer_port) in enumerate(self.peers):
-                listbox.insert(idx, f"{peer_ip}:{peer_port}")
-            listbox.pack(pady=10)
-
-            def open_chat():
-                selected_idx = listbox.curselection()
-                if selected_idx:
-                    selected_item = listbox.get(selected_idx[0])
-                    selected_peer_ip, selected_peer_port = selected_item.split(':')
-                    selected_peer_port = int(selected_peer_port)
-                    selected_peer = self.peers[(selected_peer_ip, selected_peer_port)]
-                    self.open_chat_window(selected_peer)
-
-            open_chat_button = tk.Button(self.current_frame, text="Open Chat", command=open_chat)
-            open_chat_button.pack(pady=10)
-
-        back_button = tk.Button(self.current_frame, text="Back", command=self.setup_main_menu)
-        back_button.pack(pady=10)
-
-    def open_chat_window(self, peer):
-        """
-        Opens a chat window for communication with the peer.
-        """
-        if peer.chat_window:
-            peer.chat_window.lift()
-            return
-
-        chat_window = tk.Toplevel(self.root)
-        chat_window.title(f"Chat with {peer.ip}:{peer.port}")
-        chat_window.geometry("500x500")
-
-        chat_text = tk.Text(chat_window, height=25, width=60, state=tk.DISABLED)
-        chat_text.pack(pady=10)
-
-        self.load_chat_from_file(peer, chat_text)
-
-        message_var = tk.StringVar()
-        message_entry = tk.Entry(chat_window, textvariable=message_var, width=50)
-        message_entry.pack(pady=5, padx=10, fill=tk.X)
-
-        send_button = tk.Button(chat_window, text="Send", command=lambda: self.send_message(peer, message_var, chat_text))
-        send_button.pack(pady=5)
-
-        message_entry.bind('<Return>', lambda event: self.send_message(peer, message_var, chat_text))
-
-        peer.chat_window = chat_window
-
-        def on_close():
-            peer.chat_window = None
-            chat_window.destroy()
-
-        chat_window.protocol("WM_DELETE_WINDOW", on_close)
+    #def open_chat_window(self, peer):
+    #    """
+    #    Opens a chat window for communication with the peer.
+    #    """
+    #    if peer.chat_window:
+    #        peer.chat_window.lift()
+    #        return
+#
+    #    chat_window = tk.Toplevel(self.root)
+    #    chat_window.title(f"Chat with {peer.ip}:{peer.port}")
+    #    chat_window.geometry("500x500")
+#
+    #    chat_text = tk.Text(chat_window, height=25, width=60, state=tk.DISABLED)
+    #    chat_text.pack(pady=10)
+#
+    #    self.load_chat_from_file(peer, chat_text)
+#
+    #    message_var = tk.StringVar()
+    #    message_entry = tk.Entry(chat_window, textvariable=message_var, width=50)
+    #    message_entry.pack(pady=5, padx=10, fill=tk.X)
+#
+    #    send_button = tk.Button(chat_window, text="Send", command=lambda: self.send_message(peer, message_var, chat_text))
+    #    send_button.pack(pady=5)
+#
+    #    message_entry.bind('<Return>', lambda event: self.send_message(peer, message_var, chat_text))
+#
+    #    peer.chat_window = chat_window
+#
+    #    def on_close():
+    #        peer.chat_window = None
+    #        chat_window.destroy()
+#
+    #    chat_window.protocol("WM_DELETE_WINDOW", on_close)
 
     def send_message(self, peer, message_var, text_area):
         """
@@ -492,25 +484,25 @@ class P2PChatApp:
                 peer.connection.sendall(encrypted_message)
                 print("Sent message")
 
-                self.update_chat_window(peer, message, sender=True)
+                self.T.update_chat_window(peer, message, sender=True)
                 self.save_chat_to_file(peer, f"You: {message}")
             except Exception as e:
                 messagebox.showerror("Error", f"Could not send message: {e}")
 
-    def update_chat_window(self, peer, message, sender=False):
-        """
-        Updates the chat window with new messages.
-        """
-        if peer.chat_window:
-            text_area = peer.chat_window.children.get('!text')
-            if text_area:
-                text_area.config(state=tk.NORMAL)
-                if sender:
-                    text_area.insert(tk.END, f"You: {message}\n")
-                else:
-                    text_area.insert(tk.END, f"{peer.ip}:{peer.port}: {message}\n")
-                text_area.config(state=tk.DISABLED)
-                text_area.see(tk.END)
+    #def update_chat_window(self, peer, message, sender=False):
+    #    """
+    #    Updates the chat window with new messages.
+    #    """
+    #    if peer.chat_window:
+    #        text_area = peer.chat_window.children.get('!text')
+    #        if text_area:
+    #            text_area.config(state=tk.NORMAL)
+    #            if sender:
+    #                text_area.insert(tk.END, f"You: {message}\n")
+    #            else:
+    #                text_area.insert(tk.END, f"{peer.ip}:{peer.port}: {message}\n")
+    #            text_area.config(state=tk.DISABLED)
+    #            text_area.see(tk.END)
 
     def save_chat_to_file(self, peer, message):
         """
@@ -520,17 +512,17 @@ class P2PChatApp:
         with open(filename, 'a', encoding='utf-8') as f:
             f.write(message + '\n')
 
-    def load_chat_from_file(self, peer, text_area):
-        """
-        Loads the conversation history from a file.
-        """
-        filename = f"chat_{peer.ip}_{peer.port}.txt"
-        if os.path.exists(filename):
-            with open(filename, 'r', encoding='utf-8') as f:
-                chat_history = f.read()
-                text_area.config(state=tk.NORMAL)
-                text_area.insert(tk.END, chat_history)
-                text_area.config(state=tk.DISABLED)
+    #def load_chat_from_file(self, peer, text_area):
+    #    """
+    #    Loads the conversation history from a file.
+    #    """
+    #    filename = f"chat_{peer.ip}_{peer.port}.txt"
+    #    if os.path.exists(filename):
+    #        with open(filename, 'r', encoding='utf-8') as f:
+    #            chat_history = f.read()
+    #            text_area.config(state=tk.NORMAL)
+    #            text_area.insert(tk.END, chat_history)
+    #            text_area.config(state=tk.DISABLED)
 
     def encrypt_message(self, message, aes_key):
         """
