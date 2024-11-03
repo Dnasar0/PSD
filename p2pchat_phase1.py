@@ -230,8 +230,6 @@ class P2PChatApp:
             peer_dh_public_key_bytes = self.receive_all(conn)  
             peer_dh_public_key = serialization.load_pem_public_key(peer_dh_public_key_bytes, backend=default_backend())
             
-            print(f"Received peer DH public key size: {len(peer_dh_public_key_bytes)} bytes") 
-            
             self.dh_public_key, self.dh_private_key = generate_key_pair()
 
             # Send DH public key to peer
@@ -239,8 +237,7 @@ class P2PChatApp:
                 encoding=serialization.Encoding.PEM,
                 format=serialization.PublicFormat.SubjectPublicKeyInfo
             )   
-            conn.sendall(dh_public_key_bytes)
-            print(f"Sent DH public key size: {len(dh_public_key_bytes)} bytes")      
+            conn.sendall(dh_public_key_bytes)    
             
             shared_key = self.dh_private_key.exchange(ec.ECDH(), peer_dh_public_key)
             aes_key = configure_aes_key(shared_key)
@@ -302,14 +299,9 @@ class P2PChatApp:
                 format=serialization.PublicFormat.SubjectPublicKeyInfo
             )
             sock.sendall(dh_public_key_bytes)
-            
-            # After sending DH public key
-            print(f"Sent DH public key size: {len(dh_public_key_bytes)} bytes")
 
             # Receive the peer's DH public key
-            peer_dh_public_key_bytes = self.receive_all(sock)
-
-            print(f"Received peer DH public key size: {len(peer_dh_public_key_bytes)} bytes")            
+            peer_dh_public_key_bytes = self.receive_all(sock)            
 
             peer_dh_public_key = serialization.load_pem_public_key(peer_dh_public_key_bytes, backend=default_backend())
 
