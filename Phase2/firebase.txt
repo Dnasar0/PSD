@@ -1,0 +1,39 @@
+# Initialize Firebase Admin SDK
+cred = credentials.Certificate("psdproject-6e38f-firebase-adminsdk-icq10-3708af2f3d.json")
+firebase_admin.initialize_app(cred, {
+    'databaseURL': 'https://psdproject-6e38f-default-rtdb.europe-west1.firebasedatabase.app/'
+})
+
+
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "groups": {
+      "$group_id": {
+        "members": {
+          "$user_id": {
+            ".write": "auth != null && auth.uid == $user_id",
+            ".read": "auth != null && auth.uid == $user_id"
+          }
+        },
+        "messages": {
+          ".write": "auth != null && root.child('groups').child($group_id).child('members').hasChild(auth.uid)",
+          ".read": "auth != null && root.child('groups').child($group_id).child('members').hasChild(auth.uid)"
+        }
+      }
+    },
+    "chats": {
+      "$chat_id": {
+        ".write": "auth != null && (auth.uid == $chat_id.split('_')[0] || auth.uid == $chat_id.split('_')[1])",
+        ".read": "auth != null && (auth.uid == $chat_id.split('_')[0] || auth.uid == $chat_id.split('_')[1])"
+      }
+    },
+    "recommendations": {
+      "$user_id": {
+        ".write": "auth != null && auth.uid == $user_id",
+        ".read": "auth != null && auth.uid == $user_id"
+      }
+    }
+  }
+}

@@ -21,7 +21,7 @@ class Tk:
         
     def setup_main_menu(self):
         """
-        Sets up the main menu of the GUI.
+        Sets up the main menu of the GUI with options to connect, view peers, search messages, and view recommendations.
         """
         if self.current_frame:
             self.current_frame.destroy()
@@ -29,14 +29,25 @@ class Tk:
         self.current_frame = tk.Frame(self.root)
         self.current_frame.pack(pady=20)
 
+        # Display the user's IP and port
         self.info_label = tk.Label(self.current_frame, text=f"Your IP: {self.host}\nYour Port: {self.port}")
         self.info_label.pack(pady=10)
 
-        self.connect_button = tk.Button(self.current_frame, text="Connect to a peer", command=self.show_connection_inputs)
+        # Button to connect to a new peer or group
+        self.connect_button = tk.Button(self.current_frame, text="Connect", command=self.show_connection_inputs)
         self.connect_button.pack(pady=10)
 
-        self.list_button = tk.Button(self.current_frame, text="Peers List", command=self.show_peer_list)
+        # Button to view the list of connected peers and groups
+        self.list_button = tk.Button(self.current_frame, text="Peers/Groups List", command=self.show_peer_list)
         self.list_button.pack(pady=10)
+
+        # Button to search messages
+        self.search_button = tk.Button(self.current_frame, text="Search Messages", command=self.search_messages)
+        self.search_button.pack(pady=10)
+
+        # Button to view personalized recommendations
+        self.recommendations_button = tk.Button(self.current_frame, text="View Recommendations", command=self.show_recommendations)
+        self.recommendations_button.pack(pady=10)
 
     def show_connection_inputs(self):
         """
