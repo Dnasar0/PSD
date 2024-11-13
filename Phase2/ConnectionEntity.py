@@ -10,3 +10,4 @@ class ConnectionEntity:
         self.chat_text = None  # Text widget in the chat window
         self.is_group = is_group  # Flag to indicate if it's a group
         self.group_name = group_name  # Group name, if it's a group
+        self.messages = []  # List to store messages for searching

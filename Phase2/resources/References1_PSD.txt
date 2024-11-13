@@ -1,0 +1,17 @@
+3.1 Socket
+A biblioteca usada para se criar sockets TCP/IP (Python Standard Library) para comunicação de rede entre os peers, é a biblioteca socket, esta que permite a criação de servidores e clientes TCP, essenciais para a estrutura P2P. (Documentação Oficial: Python Socket Library)
+
+3.2 Threading
+A biblioteca threading (Python Standard Library) permite que a aplicação execute múltiplas threads em simultâneo, facilitando a execução do servidor e da interface gráfica ao mesmo tempo. (Documentação Oficial: Python Threading Library)
+
+3.3 Tkinter
+A biblioteca Tkinter (Python Standard Library) é utilizado para criar a interface gráfica da aplicação, permitindo a interação entre os utilizadores de forma intuitiva e visual. A biblioteca é uma das ferramentas padrão para GUI em Python. (Documentação Oficial: Python Tkinter Library)
+
+3.4 Cryptography
+A biblioteca cryptography (Third-Party Library) é utilizada para implementar a troca de chaves ElIptic Curve Diffie-Hellman (ECDH), bem como criptografia simétrica (AES), além de manipular certificados para autenticação de peers. É uma biblioteca moderna que provê métodos seguros para operações criptográficas. (Documentação Oficial: Cryptography Library Documentation)
+
+3.5 JSON
+A biblioteca json (Python Standard Library) é usada para manipular dados no formato JSON, especificamente para carregar e guardar a lista de peers confiáveis (ACL). Isso facilita a persistência de dados de forma estruturada e legível. (Documentação Oficial: Python JSON Library)
+
+3.6 OS e SYS
+As bibliotecas os e sys (Python Standard Library) são usadas para manipular o sistema de arquivos e para operações do sistema operativo, como a criação de diretórios e manipulação de caminhos. São também utilizadas para encerrar a aplicação em caso de erros críticos. (Documentação Oficial: Python OS Library, Python SYS Library)

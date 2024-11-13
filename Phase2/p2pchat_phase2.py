@@ -27,12 +27,11 @@ if not firebase_admin._apps:
         'databaseURL': 'https://psdproject-6e38f-default-rtdb.europe-west1.firebasedatabase.app/'
     })
 
-# Directories to store keys and peers list
-KEYS_DIR = "keys"
+# Directories to store peers list
 PEERS_DIR = "peersList"
 
 # Create directories if they do not already exist
-for directory in [KEYS_DIR, PEERS_DIR]:
+for directory in [PEERS_DIR]:
     if not os.path.exists(directory):
         os.makedirs(directory)
 
@@ -44,9 +43,9 @@ def derive_aes_key(shared_key):
 
 # Function to sanitize strings for Firebase paths by replacing invalid characters
 def sanitize_for_firebase_path(s):
-   # Replace invalid characters in Firebase paths with underscores
+    # Replace invalid characters in Firebase paths with underscores
     return s.replace('.', '_').replace('$', '_').replace('#', '_').replace('[', '_').replace(']', '_').replace('/', '_')
- 
+
 # Main P2P Chat Application class
 class P2PChatApp:
     def __init__(self, host, port):
@@ -54,6 +53,7 @@ class P2PChatApp:
         self.port = port  # Local port number
         self.peers = {}  # Dictionary to store connected peers and groups
         self.server_socket = None  # Server socket for listening
+        self.messages_loaded = False  # Flag to indicate if messages have been loaded
 
         # Generate ECDH key pair for secure communication
         self.private_key, self.public_key = self.generate_ecdh_key_pair()
@@ -142,7 +142,6 @@ class P2PChatApp:
         # Derive the corresponding public key
         public_key = private_key.public_key()
         return private_key, public_key
-
 
     def start_server(self):
         """
@@ -248,18 +247,51 @@ class P2PChatApp:
             threading.Thread(target=self.connect_to_peer_ui, args=(peer_ip, peer_port), daemon=True).start()
 
         elif connection_type == 'group':
-            # Get group name from input field
-            group_name = self.gui_app.group_name_entry.get()
-            if not group_name:
-                messagebox.showerror("Error", "Group name cannot be empty!")
-                return
-
-            self.connect_to_group(group_name)
+            # Do nothing here, as group connection is handled by the GUI
+            pass
 
     def connect_to_group(self, group_name):
         """
-        Connects to a group chat by name.
+        Connects to a group chat by name, after checking if the user has access to the group based on their topics of interest.
         """
+        # First, get the user's topics of interest from Firebase
+        user_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
+        user_ref = db.reference(f"users/{user_id}")
+        user_data = user_ref.get()
+        user_topics = user_data.get('topics', []) if user_data else []
+
+        # Get the group's topic from Firebase
+        group_id = sanitize_for_firebase_path(group_name)
+        group_ref = db.reference(f"groups/{group_id}")
+        group_data = group_ref.get()
+        group_topic = group_data.get('topic') if group_data else None
+
+        if not group_topic:
+            # If the group doesn't exist yet, prompt the user to set the topic for the new group
+            messagebox.showinfo("New Group", f"The group '{group_name}' does not exist. Creating a new group.")
+            # Ask the user to select a topic for the new group from their topics of interest
+            if not user_topics:
+                messagebox.showerror("Error", "You have not selected any topics of interest.")
+                return
+
+            topic = simpledialog.askstring("Group Topic", "Select a topic for the new group:\n" + "\n".join(user_topics))
+            if not topic or topic not in user_topics:
+                messagebox.showerror("Error", "Invalid topic selected for the group.")
+                return
+
+            # Save the group topic to Firebase
+            group_ref.set({'topic': topic})
+            group_topic = topic  # Set group_topic for access check
+        else:
+            # Group already exists, topic is known
+            pass
+
+        # Check if the group topic is in the user's topics of interest
+        if group_topic not in user_topics:
+            messagebox.showerror("Access Denied", f"You do not have access to the group '{group_name}' as it is not in your topics of interest.")
+            return
+
+        # Proceed to connect to the group
         if group_name not in self.peers:
             # Create a ConnectionEntity for the group
             entity = ConnectionEntity.ConnectionEntity(None, None, None, None, None, is_group=True, group_name=group_name)
@@ -328,7 +360,7 @@ class P2PChatApp:
 
             # Create a ConnectionEntity to represent the connection
             entity = ConnectionEntity.ConnectionEntity(peer_ip, peer_listening_port, sock, peer_public_key, session_aes_key, is_group)
-            self.peers[(peer_ip, peer_listening_port)] = entity  # Use tuple as key
+            self.peers[(peer_ip, peer_port)] = entity  # Use tuple as key
             # Start a thread to receive messages from the peer
             threading.Thread(target=self.receive_messages, args=(entity,), daemon=True).start()
             print(f"Connected to {peer_ip}:{peer_port} as {'Group' if is_group else 'Peer'}")
@@ -481,10 +513,6 @@ class P2PChatApp:
             chat_ref = db.reference(f"chats/{chat_id}")
             chat_ref.push({'sender': sender, 'message': message})
 
-        # Simulate recommendation system by analyzing messages
-        self.analyze_message_for_recommendations(message)
-
-
     def encrypt_message(self, message, aes_key):
         """
         Encrypts the message using AES in GCM mode.
@@ -512,72 +540,138 @@ class P2PChatApp:
 
     def perform_privacy_preserving_search(self, keywords):
         """
-        Searches all connected peers/groups for messages containing the keywords.
+        Searches all connected peers/groups for messages containing the keywords using ORAM.
         """
         results = []
 
-        # Get connected peers and groups
-        connected_entities = self.peers
+        # Collect all messages into a list
+        all_messages = []
 
-        # For each connected entity, retrieve the chat messages
-        for key, entity in connected_entities.items():
+        # Ensure messages are loaded
+        self.load_all_messages()
+
+        # For each connected entity, retrieve the cached messages
+        for entity_key, entity in self.peers.items():
+            if entity.messages:
+                # Simulate ORAM by shuffling the messages
+                import random
+                random.shuffle(entity.messages)
+
+                for msg in entity.messages:
+                    message = msg['message']
+                    if any(keyword.lower() in message.lower() for keyword in keywords):
+                        if entity.is_group:
+                            results.append(f"Group '{entity.group_name}', Message: {message}")
+                        else:
+                            results.append(f"Peer {entity.ip}:{entity.port}, Message: {message}")
+                    else:
+                        # Dummy operation to simulate ORAM access pattern
+                        pass  # Do nothing
+
+        return results
+
+    def load_all_messages(self):
+        """
+        Loads messages from all connected peers and groups into memory.
+        """
+        if self.messages_loaded:
+            return  # Messages are already loaded
+
+        for entity_key, entity in self.peers.items():
+            entity.messages = []
             if entity.is_group:
-                # Search messages in the group
+                # Load messages from the group's reference in Firebase
                 group_id = sanitize_for_firebase_path(entity.group_name)
                 group_ref = db.reference(f"groups/{group_id}/messages")
                 messages = group_ref.get()
                 if messages:
-                    line_number = 0
                     for msg_key in messages:
-                        line_number += 1
                         message_data = messages[msg_key]
                         # Handle both dict and string formats
                         if isinstance(message_data, dict):
                             message = message_data.get('message', '')
+                            sender = message_data.get('sender', '')
                         else:
                             message = message_data
-                        # Check if any keyword is in the message
-                        if any(keyword.lower() in message.lower() for keyword in keywords):
-                            results.append(f"Group '{entity.group_name}', Line {line_number}: {message}")
+                            sender = ''
+                        entity.messages.append({'sender': sender, 'message': message})
             else:
-                # Search messages in the peer chat
+                # Load messages from the chat's reference in Firebase
                 chat_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}_{sanitize_for_firebase_path(entity.ip)}_{entity.port}"
                 chat_ref = db.reference(f"chats/{chat_id}")
                 messages = chat_ref.get()
                 if messages:
-                    line_number = 0
                     for msg_key in messages:
-                        line_number += 1
                         message_data = messages[msg_key]
                         # Handle both dict and string formats
                         if isinstance(message_data, dict):
                             message = message_data.get('message', '')
+                            sender = message_data.get('sender', '')
                         else:
                             message = message_data
-                        if any(keyword.lower() in message.lower() for keyword in keywords):
-                            results.append(f"Peer {entity.ip}:{entity.port}, Line {line_number}: {message}")
+                            sender = ''
+                        entity.messages.append({'sender': sender, 'message': message})
 
-        return results
-    
-    def analyze_message_for_recommendations(self, message):
+        self.messages_loaded = True  # Set the flag to indicate messages are loaded
+
+    def get_recommendations(self):
         """
-        Analyzes messages to generate recommendations.
+        Analyzes the client's own message history to determine recommended topics and groups.
         """
-        # Simple keyword-based recommendation simulation
-        ads = {
-            'sports': 'Check out the latest sports gear!',
-            'music': 'Discover new music albums!',
-            'travel': 'Plan your next vacation with us!',
-            'technology': 'Upgrade your gadgets with the newest tech!',
-            'food': 'Explore delicious recipes and restaurants!'
+        # Collect all messages sent by the client
+        user_id = f"{self.host}:{self.port}"
+        messages = []
+
+        # Load messages from all connected entities
+        self.load_all_messages()
+
+        # Go through all cached messages
+        for entity_key, entity in self.peers.items():
+            if entity.messages:
+                for msg in entity.messages:
+                    sender = msg.get('sender', '')
+                    message = msg.get('message', '')
+                    if sender == user_id or sender == 'You':
+                        messages.append(message)
+
+        # Now analyze the messages to extract topics
+        topics_keywords = {
+            'Cars': ['car', 'automobile', 'vehicle', 'drive'],
+            'Music': ['music', 'song', 'album', 'band', 'artist'],
+            'Soccer': ['soccer', 'football', 'goal', 'match', 'player'],
+            'Basketball': ['basketball', 'nba', 'hoops', 'dunk', 'player'],
+            'Cybersecurity': ['cybersecurity', 'hacking', 'security', 'malware', 'encryption'],
+            'AI-Artificial Intelligence': ['ai', 'artificial intelligence', 'machine learning', 'neural network'],
+            'IoT-Internet of Things': ['iot', 'internet of things', 'smart device', 'sensor', 'connectivity']
         }
 
-        for keyword, ad in ads.items():
-            if keyword in message.lower():
-                # Store the recommendation in the database
-                user_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
-                rec_ref = db.reference(f"recommendations/{user_id}")
-                rec_ref.set({'ad': ad})        
+        topics_count = {}
+
+        for message in messages:
+            message_lower = message.lower()
+            for topic, keywords in topics_keywords.items():
+                for keyword in keywords:
+                    if keyword in message_lower:
+                        topics_count[topic] = topics_count.get(topic, 0) + 1
+
+        # Now get the topics sorted by count
+        recommended_topics = sorted(topics_count.items(), key=lambda item: item[1], reverse=True)
+
+        # Now get the groups related to these topics
+        groups_ref = db.reference("groups")
+        groups_data = groups_ref.get()
+        recommended_groups = []
+
+        if groups_data:
+            for group_name, group_info in groups_data.items():
+                group_topic = group_info.get('topic')
+                for topic, _ in recommended_topics:
+                    if group_topic == topic:
+                        recommended_groups.append((group_name, group_topic))
+                        break
+
+        # Return the recommended topics and groups
+        return recommended_topics, recommended_groups
 
 # Main function to start the client-server
 def start_peer():

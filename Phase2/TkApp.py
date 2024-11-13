@@ -1,9 +1,10 @@
 import os
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, simpledialog
 import p2pchat_phase2 as P2PChat
 from p2pchat_phase2 import sanitize_for_firebase_path
 from firebase_admin import db
+import threading
 
 class TkApp:
     def __init__(self, p2p, host, port):
@@ -46,9 +47,62 @@ class TkApp:
         self.search_button = tk.Button(self.current_frame, text="Search Messages", command=self.search_messages)
         self.search_button.pack(pady=10)
 
+        # Add Topics of Interest button (moved above View Recommendations)
+        self.topics_button = tk.Button(self.current_frame, text="Topics of Interest", command=self.show_topics_window)
+        self.topics_button.pack(pady=10)
+
         # Button to view personalized recommendations
         self.recommendations_button = tk.Button(self.current_frame, text="View Recommendations", command=self.show_recommendations)
         self.recommendations_button.pack(pady=10)
+
+    def show_topics_window(self):
+        """
+        Displays the topics selection in the same window.
+        """
+        self.clear_frame()
+
+        tk.Label(self.current_frame, text="Select Topics of Interest").pack(pady=10)
+
+        # List of topics
+        topics = ["Cars", "Music", "Soccer", "Basketball", "Cybersecurity", "AI-Artificial Intelligence", "IoT-Internet of Things"]
+
+        # Dictionary to hold the topic variables
+        self.topic_vars = {}
+        for topic in topics:
+            var = tk.IntVar()
+            self.topic_vars[topic] = var
+            cb = tk.Checkbutton(self.current_frame, text=topic, variable=var)
+            cb.pack(anchor=tk.W)
+
+        # Load the user's existing topics from Firebase
+        user_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
+        user_ref = db.reference(f"users/{user_id}")
+        user_data = user_ref.get()
+        if user_data and 'topics' in user_data:
+            selected_topics = user_data['topics']
+            for topic in selected_topics:
+                if topic in self.topic_vars:
+                    self.topic_vars[topic].set(1)
+
+        # Save button
+        save_button = tk.Button(self.current_frame, text="Save", command=self.save_topics)
+        save_button.pack(pady=10)
+
+        # Back button to return to main menu
+        back_button = tk.Button(self.current_frame, text="Back", command=self.setup_main_menu)
+        back_button.pack(pady=10)
+
+    def save_topics(self):
+        """
+        Saves the user's selected topics to Firebase.
+        """
+        selected_topics = [topic for topic, var in self.topic_vars.items() if var.get() == 1]
+        user_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
+        user_ref = db.reference(f"users/{user_id}")
+        user_ref.update({'topics': selected_topics})
+        messagebox.showinfo("Topics Saved", "Your topics of interest have been saved.")
+        # Return to main menu
+        self.setup_main_menu()
 
     def show_connection_inputs(self):
         """
@@ -78,11 +132,6 @@ class TkApp:
         self.peer_port_entry = tk.Entry(self.peer_inputs_frame)
         self.peer_port_entry.pack(pady=5)
 
-        # Group inputs
-        tk.Label(self.group_inputs_frame, text="Group Name:").pack(pady=5)
-        self.group_name_entry = tk.Entry(self.group_inputs_frame)
-        self.group_name_entry.pack(pady=5)
-
         # Initially show peer inputs
         self.peer_inputs_frame.pack()
 
@@ -90,14 +139,14 @@ class TkApp:
         self.connect_peer_button = tk.Button(
             self.current_frame,
             text="Connect",
-            command=lambda: self.p2p.connect_to_entity(connection_type_var.get())
+            command=self.connect_to_selected_entity
         )
         self.connect_peer_button.pack(pady=10)
 
         # Back button to return to main menu
         back_button = tk.Button(self.current_frame, text="Back", command=self.setup_main_menu)
         back_button.pack(pady=10)
-        
+
     def update_connection_inputs(self):
         """
         Updates the input fields shown based on the connection type selected (peer or group).
@@ -110,7 +159,125 @@ class TkApp:
         elif connection_type == 'group':
             # Show group inputs and hide peer inputs
             self.peer_inputs_frame.pack_forget()
-            self.group_inputs_frame.pack()        
+            # Instead of group name entry, show list of groups
+            self.show_group_selection()
+
+    def show_group_selection(self):
+        """
+        Displays a list of groups in the user's topics of interest.
+        """
+        # Clear group_inputs_frame
+        for widget in self.group_inputs_frame.winfo_children():
+            widget.destroy()
+
+        # Get user's topics
+        user_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
+        user_ref = db.reference(f"users/{user_id}")
+        user_data = user_ref.get()
+        user_topics = user_data.get('topics', []) if user_data else []
+
+        if not user_topics:
+            messagebox.showerror("Error", "You have not selected any topics of interest. Please select topics before connecting to groups.")
+            return
+
+        # Get list of groups from Firebase
+        groups_ref = db.reference("groups")
+        groups_data = groups_ref.get()
+        available_groups = []
+        if groups_data:
+            for group_name, group_info in groups_data.items():
+                group_topic = group_info.get('topic')
+                if group_topic in user_topics:
+                    available_groups.append(group_name)
+
+        label = tk.Label(self.group_inputs_frame, text="Select a Group:")
+        label.pack()
+        self.group_listbox = tk.Listbox(self.group_inputs_frame)
+        if available_groups:
+            for idx, group_name in enumerate(available_groups):
+                self.group_listbox.insert(idx, group_name)
+        else:
+            self.group_listbox.insert(0, "No groups available in your topics of interest.")
+            self.group_listbox.config(state=tk.DISABLED)
+        self.group_listbox.pack()
+
+        # Button to create new group
+        create_group_button = tk.Button(self.group_inputs_frame, text="Create New Group", command=self.create_new_group)
+        create_group_button.pack(pady=5)
+
+        self.group_inputs_frame.pack()
+
+    def create_new_group(self):
+        """
+        Allows the user to create a new group in their topics of interest.
+        """
+        # Prompt for group name
+        group_name = simpledialog.askstring("New Group", "Enter the name of the new group:")
+        if not group_name:
+            return
+
+        # Get user's topics
+        user_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
+        user_ref = db.reference(f"users/{user_id}")
+        user_data = user_ref.get()
+        user_topics = user_data.get('topics', []) if user_data else []
+
+        # Prompt the user to select a topic for the new group from their topics of interest
+        if not user_topics:
+            messagebox.showerror("Error", "You have not selected any topics of interest.")
+            return
+
+        topic = simpledialog.askstring("Group Topic", "Select a topic for the new group:\n" + "\n".join(user_topics))
+        if not topic or topic not in user_topics:
+            messagebox.showerror("Error", "Invalid topic selected for the group.")
+            return
+
+        # Save the group topic to Firebase
+        group_id = sanitize_for_firebase_path(group_name)
+        group_ref = db.reference(f"groups/{group_id}")
+        group_data = group_ref.get()
+        if group_data:
+            messagebox.showerror("Error", f"The group '{group_name}' already exists.")
+            return
+
+        group_ref.set({'topic': topic})
+        messagebox.showinfo("Group Created", f"Group '{group_name}' has been created.")
+
+        # Refresh the group list
+        self.show_group_selection()
+
+    def connect_to_selected_entity(self):
+        """
+        Connects to the selected peer or group based on the inputs.
+        """
+        connection_type = self.connection_type_var.get()
+        if connection_type == 'peer':
+            # Get IP and port from input fields
+            peer_ip = self.peer_ip_entry.get()
+            peer_port = self.peer_port_entry.get()
+
+            # Input validation for IP and port
+            if not self.p2p.validate_ip(peer_ip) or not peer_port.isdigit():
+                messagebox.showerror("Error", "Invalid IP or port!")
+                return
+
+            peer_port = int(peer_port)
+
+            if (peer_ip, peer_port) in self.p2p.peers:
+                messagebox.showinfo("Info", f"Already connected to {peer_ip}:{peer_port}")
+                return
+
+            # Start a thread to connect to the peer and update UI
+            threading.Thread(target=self.p2p.connect_to_peer_ui, args=(peer_ip, peer_port), daemon=True).start()
+
+        elif connection_type == 'group':
+            # Get the selected group from the listbox
+            selected_idx = self.group_listbox.curselection()
+            if selected_idx:
+                group_name = self.group_listbox.get(selected_idx[0])
+                self.p2p.connect_to_group(group_name)
+            else:
+                messagebox.showerror("Error", "No group selected.")
 
     def clear_frame(self):
         """
@@ -245,8 +412,8 @@ class TkApp:
         if entity.chat_window:
             entity.chat_window.destroy()
             entity.chat_window = None
-            entity.chat_text = None        
-        
+            entity.chat_text = None    
+
     def update_chat_window(self, entity, message):
         """
         Updates the chat window with new messages.
@@ -332,17 +499,30 @@ class TkApp:
         recommendations_text = tk.Text(self.current_frame, height=15, width=60, state=tk.DISABLED)
         recommendations_text.pack(pady=10)
 
-        # Retrieve recommendations from the database
-        user_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
-        rec_ref = db.reference(f"recommendations/{user_id}")
-        recommendation = rec_ref.get()
+        try:
+            # Retrieve recommendations from the P2PChatApp
+            recommended_topics, recommended_groups = self.p2p.get_recommendations()
 
-        recommendations_text.config(state=tk.NORMAL)
-        if recommendation:
-            recommendations_text.insert(tk.END, recommendation['ad'])
-        else:
-            recommendations_text.insert(tk.END, "No recommendations at this time.")
-        recommendations_text.config(state=tk.DISABLED)
+            recommendations_text.config(state=tk.NORMAL)
+            if recommended_topics:
+                recommendations_text.insert(tk.END, "Based on your messages, you might be interested in these topics:\n")
+                for topic, count in recommended_topics:
+                    recommendations_text.insert(tk.END, f"- {topic} ({count} mentions)\n")
+            else:
+                recommendations_text.insert(tk.END, "No topic recommendations at this time.\n")
+
+            if recommended_groups:
+                recommendations_text.insert(tk.END, "\nYou might be interested in joining these groups:\n")
+                for group_name, group_topic in recommended_groups:
+                    recommendations_text.insert(tk.END, f"- {group_name} (Topic: {group_topic})\n")
+            else:
+                recommendations_text.insert(tk.END, "No group recommendations at this time.")
+            recommendations_text.config(state=tk.DISABLED)
+        except Exception as e:
+            # Handle exceptions, such as Firebase errors
+            messagebox.showerror("Error", f"An error occurred while fetching recommendations:\n{e}")
+            self.setup_main_menu()
+            return
 
         # Back button to return to main menu
         back_button = tk.Button(self.current_frame, text="Back", command=self.setup_main_menu)
@@ -360,10 +540,12 @@ class TkApp:
         keyword_var = tk.StringVar()
         keyword_entry = tk.Entry(self.current_frame, textvariable=keyword_var, width=30)
         keyword_entry.pack(pady=5)
+        keyword_entry.focus_set()  # Ensure the entry widget accepts input
 
         # Text area to display search results
-        result_text = tk.Text(self.current_frame, height=15, width=60, state=tk.DISABLED)
+        result_text = tk.Text(self.current_frame, height=15, width=60)
         result_text.pack(pady=10)
+        result_text.config(state=tk.DISABLED)
 
         def perform_search():
             # Perform the search based on input keywords
@@ -386,4 +568,4 @@ class TkApp:
 
         # Back button to return to main menu
         back_button = tk.Button(self.current_frame, text="Back", command=self.setup_main_menu)
-        back_button.pack(pady=10)                      
+        back_button.pack(pady=10)
