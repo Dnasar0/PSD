@@ -117,7 +117,7 @@ class P2PChatApp:
 
     def load_peers_from_file(self):
         """
-        Loads the list of connected peers and groups from a JSON file inside the peersList folder.
+        Loads peers and groups from a JSON file and initiates connections.
         """
         filename = self.get_peers_filename()
         if os.path.exists(filename):
@@ -126,16 +126,13 @@ class P2PChatApp:
             for peer_info in peers_list:
                 if peer_info['is_group']:
                     group_name = peer_info['group_name']
-                    if group_name not in self.peers:
-                        self.connect_to_group(group_name)
+                    self.connect_to_group(group_name)
                 else:
                     ip = peer_info['ip']
                     port = peer_info['port']
-                    # Attempt to connect to peer if not already connected
                     if (ip, port) not in self.peers:
                         threading.Thread(target=self.connect_to_peer, args=(ip, port), daemon=True).start()
-        else:
-            print("No previous peers to load.")
+
 
     def generate_ecdh_key_pair(self):
         """
@@ -177,103 +174,71 @@ class P2PChatApp:
             except Exception as e:
                 print(f"Error accepting connection: {e}")
 
-    def handle_new_connection(self, conn, peer_ip):
+    def handle_new_connection(self, conn, identifier):
         """
-        Processes new connections received from peers.
+        Processes new connections from peers or groups.
         """
         try:
-            # Exchange public keys with the peer for ECDH key exchange
-            peer_public_key_bytes = self.receive_all(conn)
-            peer_public_key = serialization.load_pem_public_key(peer_public_key_bytes, backend=default_backend())
-            print("Received peer's public key")
+            if isinstance(identifier, str):  # Indicates a group connection by name
+                group_name = identifier
+                print(f"Establishing connection to group '{group_name}' using ABE.")
+                # Handle ABE encryption setup here
+                entity = self.peers[group_name]
+                # Start a thread to receive messages specifically for groups
+                threading.Thread(target=self.listen_to_group_messages, args=(entity,), daemon=True).start()
 
-            # Send own public key to the peer
-            conn.sendall(self.public_key_bytes)
-            print("Sent own public key")
+            else:  # Regular peer-to-peer connection
+                peer_ip = identifier
+                # Proceed with ECDH key exchange and other logic for peer connections
+                peer_public_key_bytes = self.receive_all(conn)
+                peer_public_key = serialization.load_pem_public_key(
+                    peer_public_key_bytes, backend=default_backend()
+                )
+                print("Received peer's public key")
+                conn.sendall(self.public_key_bytes)
+                print("Sent own public key")
 
-            # Generate shared secret using ECDH and derive AES key
-            shared_key = self.private_key.exchange(ec.ECDH(), peer_public_key)
-            session_aes_key = derive_aes_key(shared_key)
+                shared_key = self.private_key.exchange(ec.ECDH(), peer_public_key)
+                session_aes_key = derive_aes_key(shared_key)
 
-            # Receive connection type and listening port from the peer
-            msg_length_bytes = conn.recv(4)
-            if not msg_length_bytes:
-                raise Exception("Connection closed by peer!")
-            msg_length = int.from_bytes(msg_length_bytes, byteorder='big')
-            encrypted_info = self.receive_exact(conn, msg_length)
-            info = self.decrypt_message(encrypted_info, session_aes_key)
-            connection_type, peer_listening_port = info.split(',')
-            peer_listening_port = int(peer_listening_port)
+                msg_length_bytes = conn.recv(4)
+                if not msg_length_bytes:
+                    raise Exception("Connection closed by peer!")
+                msg_length = int.from_bytes(msg_length_bytes, byteorder='big')
+                encrypted_info = self.receive_exact(conn, msg_length)
+                info = self.decrypt_message(encrypted_info, session_aes_key)
+                connection_type, peer_listening_port = info.split(',')
+                peer_listening_port = int(peer_listening_port)
 
-            # Send own connection type and listening port to the peer
-            my_info = f"peer,{self.port}"
-            encrypted_info = self.encrypt_message(my_info, session_aes_key)
-            msg_length = len(encrypted_info)
-            conn.sendall(msg_length.to_bytes(4, byteorder='big'))
-            conn.sendall(encrypted_info)
-
-            # Determine if the connection is to a group or a peer
-            is_group = (connection_type == 'group')
-
-            # Create a ConnectionEntity to represent the connection
-            entity = ConnectionEntity.ConnectionEntity(peer_ip, peer_listening_port, conn, peer_public_key, session_aes_key, is_group)
-            self.peers[(peer_ip, peer_listening_port)] = entity  # Use tuple as key
-            print(f"Connected: {peer_ip}:{peer_listening_port} as {'Group' if is_group else 'Peer'}")
-
-            # Start a thread to receive messages from the peer
-            threading.Thread(target=self.receive_messages, args=(entity,), daemon=True).start()
+                entity = ConnectionEntity.ConnectionEntity(
+                    peer_ip, peer_listening_port, conn, peer_public_key, session_aes_key, is_group=False
+                )
+                print(f"Connected: {peer_ip}:{peer_listening_port} as Peer")
+                self.peers[(peer_ip, peer_listening_port)] = entity
+                threading.Thread(target=self.receive_messages, args=(entity,), daemon=True).start()
 
         except Exception as e:
-            print(f"Error establishing connection with {peer_ip}: {e}")
-            conn.close()
+            print(f"Error establishing connection with {identifier}: {e}")
+            if conn:
+                conn.close()
 
-    def connect_to_entity(self, connection_type):
-        """
-        Connects to a remote peer or group using user-provided IP and port or group name.
-        """
-        if connection_type == 'peer':
-            # Get IP and port from input fields
-            peer_ip = self.gui_app.peer_ip_entry.get()
-            peer_port = self.gui_app.peer_port_entry.get()
-
-            # Input validation for IP and port
-            if not self.validate_ip(peer_ip) or not peer_port.isdigit():
-                messagebox.showerror("Error", "Invalid IP or port!")
-                return
-
-            peer_port = int(peer_port)
-
-            if (peer_ip, peer_port) in self.peers:
-                messagebox.showinfo("Info", f"Already connected to {peer_ip}:{peer_port}")
-                return
-
-            # Start a thread to connect to the peer and update UI
-            threading.Thread(target=self.connect_to_peer_ui, args=(peer_ip, peer_port), daemon=True).start()
-
-        elif connection_type == 'group':
-            # Do nothing here, as group connection is handled by the GUI
-            pass
 
     def connect_to_group(self, group_name):
         """
-        Connects to a group chat by name, after checking if the user has access to the group based on their topics of interest.
+        Connects to a group chat by name, creating the group if it does not exist.
         """
-        # First, get the user's topics of interest from Firebase
         user_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
         user_ref = db.reference(f"users/{user_id}")
         user_data = user_ref.get()
         user_topics = user_data.get('topics', []) if user_data else []
 
-        # Get the group's topic from Firebase
         group_id = sanitize_for_firebase_path(group_name)
         group_ref = db.reference(f"groups/{group_id}")
         group_data = group_ref.get()
         group_topic = group_data.get('topic') if group_data else None
 
         if not group_topic:
-            # If the group doesn't exist yet, prompt the user to set the topic for the new group
             messagebox.showinfo("New Group", f"The group '{group_name}' does not exist. Creating a new group.")
-            # Ask the user to select a topic for the new group from their topics of interest
             if not user_topics:
                 messagebox.showerror("Error", "You have not selected any topics of interest.")
                 return
@@ -283,29 +248,23 @@ class P2PChatApp:
                 messagebox.showerror("Error", "Invalid topic selected for the group.")
                 return
 
-            # Save the group topic to Firebase
             group_ref.set({'topic': topic})
-            group_topic = topic  # Set group_topic for access check
-        else:
-            # Group already exists, topic is known
-            pass
+            group_topic = topic  # Use this for access verification
 
-        # Check if the group topic is in the user's topics of interest
         if group_topic not in user_topics:
             messagebox.showerror("Access Denied", f"You do not have access to the group '{group_name}' as it is not in your topics of interest.")
             return
 
-        # Proceed to connect to the group
         if group_name not in self.peers:
-            # Create a ConnectionEntity for the group
+            # Create a ConnectionEntity for the group without a connection
             entity = ConnectionEntity.ConnectionEntity(None, None, None, None, None, is_group=True, group_name=group_name)
             self.peers[group_name] = entity
-            # Start a thread to receive messages from the group
-            threading.Thread(target=self.receive_messages, args=(entity,), daemon=True).start()
+            threading.Thread(target=self.handle_new_connection, args=(None, group_name), daemon=True).start()
             messagebox.showinfo("Connected to Group", f"Connected to group '{group_name}'")
             self.gui_app.setup_main_menu()
         else:
             messagebox.showinfo("Info", f"Already connected to group '{group_name}'")
+
 
     def connect_to_peer_ui(self, peer_ip, peer_port):
         """
@@ -541,28 +500,6 @@ class P2PChatApp:
         # Decrypt the ciphertext
         plaintext = decryptor.update(ciphertext) + decryptor.finalize()
         return plaintext.decode('utf-8')
-    
-    # Function to encrypt a message with an attribute key
-    def encrypt_message_with_attribute(message, attribute):
-        aes_key = derive_key_from_attribute(attribute)
-        nonce = secrets.token_bytes(12)  # Generate a random nonce for GCM
-        encryptor = Cipher(algorithms.AES(aes_key), modes.GCM(nonce)).encryptor()
-        ciphertext = encryptor.update(message.encode()) + encryptor.finalize()
-        return nonce + ciphertext + encryptor.tag
-
-    # Function to decrypt a message with an attribute key
-    def decrypt_message_with_attribute(encrypted_message, attribute):
-        aes_key = derive_key_from_attribute(attribute)
-        nonce = encrypted_message[:12]
-        tag = encrypted_message[-16:]
-        ciphertext = encrypted_message[12:-16]
-        decryptor = Cipher(algorithms.AES(aes_key), modes.GCM(nonce, tag)).decryptor()
-        try:
-            plaintext = decryptor.update(ciphertext) + decryptor.finalize()
-            return plaintext.decode()
-        except Exception as e:
-            print("Decryption failed:", e)
-            return None    
 
     def perform_privacy_preserving_search(self, keywords):
         """
