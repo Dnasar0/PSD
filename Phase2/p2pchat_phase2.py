@@ -22,9 +22,11 @@ import ConnectionEntity
 import TkApp
 
 if not firebase_admin._apps:
-    cred = credentials.Certificate("psdproject-6e38f-firebase-adminsdk-icq10-3708af2f3d.json")
+    #cred = credentials.Certificate("psdproject-6e38f-firebase-adminsdk-icq10-3708af2f3d.json")
+    cred = credentials.Certificate("projetopsd-5a681-19d45fdfc118.json")
     firebase_admin.initialize_app(cred, {
-        'databaseURL': 'https://psdproject-6e38f-default-rtdb.europe-west1.firebasedatabase.app/'
+        #'databaseURL': 'https://psdproject-6e38f-default-rtdb.europe-west1.firebasedatabase.app/'
+        'databaseURL': 'https://projetopsd-5a681-default-rtdb.europe-west1.firebasedatabase.app/'
     })
 
 # Directories to store peers list
@@ -62,6 +64,26 @@ class P2PChatApp:
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo
         )
+        
+        user_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
+        user_ref = db.reference(f"users/{user_id}")
+
+        try:
+            # Check if the user already exists in the database
+            user_data = user_ref.get()
+            print("User data retrieved:", user_data)
+
+            if not user_data:
+                # Create the user entry with host and port if it doesn't exist
+                user_ref.set({
+                    'topics': ['None']  # Initialize with an empty list
+                })
+                print("User entry created in the database.")
+            else:
+                print("User already exists in the database.")
+
+        except Exception as e:
+            print(f"Failed to interact with Firebase: {e}")
 
         # Initialize the TkApp class with the existing root instance
         self.gui_app = TkApp.TkApp(self, host, port)        
@@ -524,6 +546,35 @@ class P2PChatApp:
         ciphertext = encryptor.update(message.encode('utf-8')) + encryptor.finalize()
         # Return the concatenation of nonce, ciphertext, and tag
         return nonce + ciphertext + encryptor.tag
+    
+    def save_topics(self):
+        """
+        Saves the user's selected topics to Firebase and handles the 'None' placeholder appropriately.
+        """
+        selected_topics = [topic for topic, var in self.gui_app.topic_vars.items() if var.get() == 1]
+        user_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
+        user_ref = db.reference(f"users/{user_id}")
+        user_data = user_ref.get()
+
+        if selected_topics:
+
+            if user_data and 'topics' in user_data and 'None' in user_data['topics']:
+                current_topics = [topic for topic in user_data['topics'] if topic != 'None']
+                current_topics.extend(selected_topics)
+
+                user_ref.update({'topics': list(set(current_topics))})
+            else:
+                # Just update with selected topics if 'None' isn't present
+                user_ref.update({'topics': selected_topics})
+            print("Topics saved:", selected_topics)
+        else:
+            # If no topics are selected, add 'None' to keep the user entry alive in the database
+            user_ref.update({'topics': ['None']})
+            print("No topics selected, placeholder 'None' added.")
+
+        messagebox.showinfo("Topics Saved", "Your topics of interest have been saved.")
+        self.setup_main_menu()
+
 
     def decrypt_message(self, encrypted_message, aes_key):
         """
@@ -688,6 +739,7 @@ def start_peer():
             host = socket.gethostbyname(socket.gethostname())
         except Exception:
             host = '127.0.0.1'  # Fallback to localhost if unable to get IP
+
         # Initialize the P2P Chat Application
         app = P2PChatApp(host, local_port)
         app.gui_app.root.mainloop()
