@@ -72,6 +72,26 @@ class P2PChatApp:
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo
         )
+        
+        user_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
+        user_ref = db.reference(f"users/{user_id}")
+
+        try:
+            # Check if the user already exists in the database
+            user_data = user_ref.get()
+            print("User data retrieved:", user_data)
+
+            if not user_data:
+                # Create the user entry with host and port if it doesn't exist
+                user_ref.set({
+                    'topics': ['None']  # Initialize with an empty list
+                })
+                print("User entry created in the database.")
+            else:
+                print("User already exists in the database.")
+
+        except Exception as e:
+            print(f"Failed to interact with Firebase: {e}")        
 
         # Initialize AWS S3 client
         self.s3_bucket_name = 'p2pchatpsd'  # Replace with your S3 bucket name
@@ -658,6 +678,34 @@ class P2PChatApp:
             print(f"Decryption failed: {e}")
             # Optionally return a placeholder
             return "[Unable to decrypt message]"
+        
+    def save_topics(self):
+        """
+        Saves the user's selected topics to Firebase and handles the 'None' placeholder appropriately.
+        """
+        selected_topics = [topic for topic, var in self.gui_app.topic_vars.items() if var.get() == 1]
+        user_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
+        user_ref = db.reference(f"users/{user_id}")
+        user_data = user_ref.get()
+
+        if selected_topics:
+
+            if user_data and 'topics' in user_data and 'None' in user_data['topics']:
+                current_topics = [topic for topic in user_data['topics'] if topic != 'None']
+                current_topics.extend(selected_topics)
+
+                user_ref.update({'topics': list(set(current_topics))})
+            else:
+                # Just update with selected topics if 'None' isn't present
+                user_ref.update({'topics': selected_topics})
+            print("Topics saved:", selected_topics)
+        else:
+            # If no topics are selected, add 'None' to keep the user entry alive in the database
+            user_ref.update({'topics': ['None']})
+            print("No topics selected, placeholder 'None' added.")
+
+        messagebox.showinfo("Topics Saved", "Your topics of interest have been saved.")
+        self.gui_app.setup_main_menu()        
 
 
     def get_group_key(self, group_entity):

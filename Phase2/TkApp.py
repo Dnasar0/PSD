@@ -86,24 +86,13 @@ class TkApp:
                     self.topic_vars[topic].set(1)
 
         # Save button
-        save_button = tk.Button(self.current_frame, text="Save", command=self.save_topics)
+        save_button = tk.Button(self.current_frame, text="Save", command=self.p2p.save_topics)
         save_button.pack(pady=10)
 
         # Back button to return to main menu
         back_button = tk.Button(self.current_frame, text="Back", command=self.setup_main_menu)
         back_button.pack(pady=10)
 
-    def save_topics(self):
-        """
-        Saves the user's selected topics to Firebase.
-        """
-        selected_topics = [topic for topic, var in self.topic_vars.items() if var.get() == 1]
-        user_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
-        user_ref = db.reference(f"users/{user_id}")
-        user_ref.update({'topics': selected_topics})
-        messagebox.showinfo("Topics Saved", "Your topics of interest have been saved.")
-        # Return to main menu
-        self.setup_main_menu()
 
     def show_connection_inputs(self):
         """
