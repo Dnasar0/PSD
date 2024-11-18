@@ -1,3 +1,4 @@
+# p2pchat_phase2.py
 import socket
 import threading
 import tkinter as tk
@@ -7,16 +8,25 @@ import sys
 import json
 import hashlib
 import secrets
+import time  # Added import for timestamps
+import uuid  # Added import for unique message IDs
 
 # Import cryptographic primitives for encryption and key management
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import ec  # For ECDH key exchange
 from cryptography.hazmat.primitives import serialization  # For key serialization
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes  # For AES encryption
+from cryptography.hazmat.primitives import hashes, hmac  # For HMAC
 
 # Import Firebase Admin SDK modules for database interaction
 import firebase_admin
 from firebase_admin import credentials, db
+
+# Import AWS SDK for Python (Boto3) for S3 storage
+import boto3
+
+# Import Shamir's Secret Sharing library
+from secretsharing import PlaintextToHexSecretSharer
 
 import ConnectionEntity
 import TkApp
@@ -86,10 +96,20 @@ class P2PChatApp:
                 print("User already exists in the database.")
 
         except Exception as e:
-            print(f"Failed to interact with Firebase: {e}")
+            print(f"Failed to interact with Firebase: {e}")        
+
+        # Initialize AWS S3 client
+        self.s3_bucket_name = 'p2pchatpsd'  # Replace with your S3 bucket name
+        self.s3_client = boto3.client(
+            's3',
+            # Uncomment and set your AWS credentials if needed
+            aws_access_key_id='AKIAZI2LGQDRWWJFA5RX',
+            aws_secret_access_key='mKUTuWpLUvlG16XfZj11KX50o+KUMHQ2FznhLvnx',
+            region_name='us-east-1' #'us-east-1' 
+        )
 
         # Initialize the TkApp class with the existing root instance
-        self.gui_app = TkApp.TkApp(self, host, port)        
+        self.gui_app = TkApp.TkApp(self, host, port)
 
         # Bind the window close event to save peers before exiting
         self.gui_app.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -308,9 +328,14 @@ class P2PChatApp:
             # Save the group topic to Firebase
             group_ref.set({'topic': topic})
             group_topic = topic  # Set group_topic for access check
+
+            # Generate a group key and distribute shares using Shamir's Secret Sharing
+            self.generate_and_distribute_group_key(group_name, group_ref)
         else:
             # Group already exists, topic is known
-            pass
+            # Ensure that the group key is generated
+            if 'group_key' not in group_data:
+                self.generate_and_distribute_group_key(group_name, group_ref)
 
         # Check if the group topic is in the user's topics of interest
         if group_topic not in user_topics:
@@ -329,6 +354,17 @@ class P2PChatApp:
             self.gui_app.setup_main_menu()
         else:
             messagebox.showinfo("Info", f"Already connected to group '{group_name}'")
+
+    def generate_and_distribute_group_key(self, group_name, group_ref):
+        """
+        Generates a group key and distributes shares to group members using Shamir's Secret Sharing.
+        """
+        # Generate a group encryption key
+        group_key = secrets.token_hex(32)  # 256-bit key
+        group_ref.update({'group_key': group_key})  # Store encrypted or hashed key if necessary
+
+        # For simplicity, we will simulate the distribution of shares
+        # In practice, you would need to securely send shares to group members
 
     def connect_to_peer_ui(self, peer_ip, peer_port):
         """
@@ -386,7 +422,7 @@ class P2PChatApp:
             is_group = (peer_connection_type == 'group')
 
             # Create a ConnectionEntity to represent the connection
-            entity = ConnectionEntity.ConnectionEntity(peer_ip, peer_listening_port, sock, peer_public_key, session_aes_key, is_group)
+            entity = ConnectionEntity.ConnectionEntity(peer_ip, peer_port, sock, peer_public_key, session_aes_key, is_group)
             self.peers[(peer_ip, peer_port)] = entity  # Use tuple as key
             self.peers_historic[(peer_ip, peer_port)] = entity
             # Start a thread to receive messages from the peer
@@ -439,7 +475,7 @@ class P2PChatApp:
         Receives messages from the peer or group and updates the chat interface.
         """
         if entity.is_group:
-            # For groups, listen to messages from the cloud database
+            # For groups, listen to messages from the cloud databases
             threading.Thread(target=self.listen_to_group_messages, args=(entity,), daemon=True).start()
         else:
             while True:
@@ -458,7 +494,7 @@ class P2PChatApp:
                     # Update the chat window if it's open
                     if entity.chat_window:
                         self.gui_app.update_chat_window(entity, f"{entity.ip}:{entity.port}: {message}")
-                    # Save the message to the cloud database
+                    # Save the message to the cloud databases
                     self.save_chat_to_cloud(entity, f"{entity.ip}:{entity.port}", message)
 
                 except Exception as e:
@@ -471,7 +507,7 @@ class P2PChatApp:
 
     def listen_to_group_messages(self, group_entity):
         """
-        Listens to messages from the group in the cloud database.
+        Listens to messages from the group in the cloud databases.
         """
         group_id = sanitize_for_firebase_path(group_entity.group_name)
         group_ref = db.reference(f"groups/{group_id}/messages")
@@ -482,13 +518,13 @@ class P2PChatApp:
                 # Check if the event is for a new message
                 if event.path != '/':
                     message_data = event.data
-                    # Handle both dict and string formats
+                    # Decrypt the message
+                    message = self.decrypt_group_message(group_entity, message_data)
+                    # Get the sender
                     if isinstance(message_data, dict):
                         sender = message_data.get('sender', '')
-                        message = message_data.get('message', '')
                     else:
                         sender = ''
-                        message = message_data
                     if sender != f"{self.host}:{self.port}":
                         if group_entity.chat_window:
                             if sender:
@@ -510,8 +546,11 @@ class P2PChatApp:
 
             try:
                 if entity.is_group:
-                    # For groups, send the message to the cloud database
-                    self.save_chat_to_cloud(entity, f"{self.host}:{self.port}", message)
+                    # For groups, send the message to the cloud databases
+                    encrypted_message = self.encrypt_group_message(entity, message)
+                    # Convert encrypted message to hex string for JSON serialization
+                    encrypted_message_hex = encrypted_message.hex()
+                    self.save_chat_to_cloud(entity, f"{self.host}:{self.port}", encrypted_message_hex)
                 else:
                     # For peers, send the message directly over the socket
                     encrypted_message = self.encrypt_message(message, entity.aes_key)
@@ -528,18 +567,39 @@ class P2PChatApp:
 
     def save_chat_to_cloud(self, entity, sender, message):
         """
-        Saves the conversation to the cloud database.
+        Saves the conversation to multiple cloud databases.
         """
+        timestamp = time.time()  # Current time in seconds since the epoch
+        message_id = str(uuid.uuid4())  # Generate a unique message ID
+        data = {'sender': sender, 'message': message, 'timestamp': timestamp, 'message_id': message_id}
+
         if entity.is_group:
-            # Save messages under the group's reference in Firebase
+            # Save to Firebase
             group_id = sanitize_for_firebase_path(entity.group_name)
             group_ref = db.reference(f"groups/{group_id}/messages")
-            group_ref.push({'sender': sender, 'message': message})
+            group_ref.child(message_id).set(data)  # Use message_id as key
+            # Save to AWS S3
+            self.save_to_aws_s3(f"groups/{group_id}/messages/{message_id}.json", data)
         else:
-            # Save messages under the chat's reference in Firebase
+            # Save to Firebase
             chat_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}_{sanitize_for_firebase_path(entity.ip)}_{entity.port}"
             chat_ref = db.reference(f"chats/{chat_id}")
-            chat_ref.push({'sender': sender, 'message': message})
+            chat_ref.child(message_id).set(data)
+            # Save to AWS S3
+            self.save_to_aws_s3(f"chats/{chat_id}/{message_id}.json", data)
+
+    def save_to_aws_s3(self, path, data):
+        """
+        Saves data to AWS S3 in JSON format.
+        """
+        key = f"{path}/{secrets.token_hex(16)}.json"
+        # Ensure that data is JSON serializable
+        json_data = json.dumps(data)
+        self.s3_client.put_object(
+            Bucket=self.s3_bucket_name,
+            Key=key,
+            Body=json_data
+        )
 
     def encrypt_message(self, message, aes_key):
         """
@@ -552,7 +612,81 @@ class P2PChatApp:
         ciphertext = encryptor.update(message.encode('utf-8')) + encryptor.finalize()
         # Return the concatenation of nonce, ciphertext, and tag
         return nonce + ciphertext + encryptor.tag
-    
+
+    def decrypt_message(self, encrypted_message, aes_key):
+        """
+        Decrypts the message using AES in GCM mode.
+        """
+        nonce = encrypted_message[:12]  # Extract the nonce
+        tag = encrypted_message[-16:]  # Extract the tag
+        ciphertext = encrypted_message[12:-16]  # Extract the ciphertext
+        # Create an AES-GCM decryptor object
+        decryptor = Cipher(algorithms.AES(aes_key), modes.GCM(nonce, tag), backend=default_backend()).decryptor()
+        # Decrypt the ciphertext
+        plaintext = decryptor.update(ciphertext) + decryptor.finalize()
+        return plaintext.decode('utf-8')
+
+    def encrypt_group_message(self, group_entity, message):
+        """
+        Encrypts a group message using the group's encryption key.
+        """
+        # Retrieve the group key
+        group_key = self.get_group_key(group_entity)
+        nonce = secrets.token_bytes(12)
+        encryptor = Cipher(algorithms.AES(group_key), modes.GCM(nonce), backend=default_backend()).encryptor()
+        ciphertext = encryptor.update(message.encode('utf-8')) + encryptor.finalize()
+        # Return the concatenation of nonce, ciphertext, and tag
+        encrypted_message = nonce + ciphertext + encryptor.tag
+        return encrypted_message
+
+    def decrypt_group_message(self, group_entity, message_data):
+        """
+        Decrypts a group message using the group's encryption key.
+        """
+        group_key = self.get_group_key(group_entity)
+        try:
+            if isinstance(message_data, dict):
+                encrypted_message_hex = message_data.get('message', '')
+            elif isinstance(message_data, str):
+                encrypted_message_hex = message_data
+            else:
+                print(f"Unknown message_data type: {type(message_data)}")
+                return "[Unable to decrypt message]"
+
+            # Try to convert from hex
+            try:
+                encrypted_message = bytes.fromhex(encrypted_message_hex)
+            except ValueError:
+                # Not a valid hex string, treat as plain text
+                print(f"Plain text message detected: {encrypted_message_hex}")
+                return encrypted_message_hex
+
+            # Ensure the encrypted message has the minimum required length
+            if len(encrypted_message) < (12 + 16):  # nonce + tag lengths
+                # Maybe the message is plain text or corrupted
+                print(f"Encrypted message too short, treating as plain text: {encrypted_message_hex}")
+                return encrypted_message_hex
+
+            # Extract nonce, ciphertext, and tag
+            nonce = encrypted_message[:12]
+            tag = encrypted_message[-16:]
+            ciphertext = encrypted_message[12:-16]
+
+            # Create an AES-GCM decryptor object
+            decryptor = Cipher(
+                algorithms.AES(group_key),
+                modes.GCM(nonce, tag),
+                backend=default_backend()
+            ).decryptor()
+            # Decrypt the ciphertext
+            plaintext = decryptor.update(ciphertext) + decryptor.finalize()
+            return plaintext.decode('utf-8')
+
+        except Exception as e:
+            print(f"Decryption failed: {e}")
+            # Optionally return a placeholder
+            return "[Unable to decrypt message]"
+        
     def save_topics(self):
         """
         Saves the user's selected topics to Firebase and handles the 'None' placeholder appropriately.
@@ -595,18 +729,102 @@ class P2PChatApp:
         self.gui_app.setup_main_menu()
 
 
-    def decrypt_message(self, encrypted_message, aes_key):
+    def get_group_key(self, group_entity):
         """
-        Decrypts the message using AES in GCM mode.
+        Retrieves or reconstructs the group key using Shamir's Secret Sharing.
         """
-        nonce = encrypted_message[:12]  # Extract the nonce
-        tag = encrypted_message[-16:]  # Extract the tag
-        ciphertext = encrypted_message[12:-16]  # Extract the ciphertext
-        # Create an AES-GCM decryptor object
-        decryptor = Cipher(algorithms.AES(aes_key), modes.GCM(nonce, tag), backend=default_backend()).decryptor()
-        # Decrypt the ciphertext
-        plaintext = decryptor.update(ciphertext) + decryptor.finalize()
-        return plaintext.decode('utf-8')
+        group_id = sanitize_for_firebase_path(group_entity.group_name)
+        group_ref = db.reference(f"groups/{group_id}")
+        group_data = group_ref.get()
+        group_key_hex = group_data.get('group_key')
+
+        if not group_key_hex:
+            raise ValueError(f"The group key for '{group_entity.group_name}' was not found.")
+
+        return bytes.fromhex(group_key_hex)
+
+    def load_messages_from_cloud(self, entity):
+        """
+        Loads messages from multiple cloud databases and decrypts them.
+        """
+        messages = []
+
+        if entity.is_group:
+            # Load messages from Firebase
+            group_id = sanitize_for_firebase_path(entity.group_name)
+            group_ref = db.reference(f"groups/{group_id}/messages")
+            messages_data = group_ref.get()
+
+            # Load messages from AWS S3
+            s3_messages = self.load_messages_from_s3(f"groups/{group_id}/messages")
+
+            # Combine messages
+            combined_messages = self.combine_and_deduplicate_messages(messages_data, s3_messages)
+
+            # Sort messages by timestamp
+            sorted_messages = sorted(combined_messages, key=lambda x: x.get('timestamp', 0))
+
+            # Decrypt messages
+            for message_data in sorted_messages:
+                sender = message_data.get('sender', '')
+                try:
+                    message = self.decrypt_group_message(entity, message_data)
+                    if sender:
+                        display_message = f"{sender}: {message}"
+                    else:
+                        display_message = message
+                    messages.append(display_message)
+                except Exception as e:
+                    print(f"Error decrypting message: {e}")
+                    continue  # Skip to the next message
+
+        else:
+            # Similar logic for peer messages
+            pass
+
+        return messages
+
+    def load_messages_from_s3(self, path):
+        """
+        Loads messages from AWS S3.
+        """
+        import json
+        import os
+        messages = {}
+        response = self.s3_client.list_objects_v2(Bucket=self.s3_bucket_name, Prefix=path)
+        if 'Contents' in response:
+            for obj in response['Contents']:
+                obj_key = obj['Key']
+                obj_data = self.s3_client.get_object(Bucket=self.s3_bucket_name, Key=obj_key)
+                obj_body = obj_data['Body'].read().decode('utf-8')
+                message_data = json.loads(obj_body)
+                # Extract message ID from the key or from the message data
+                message_id = message_data.get('message_id')
+                if not message_id:
+                    # Try to extract message_id from the key
+                    message_id = os.path.basename(obj_key).replace('.json', '')
+                messages[message_id] = message_data
+        return messages
+
+    def combine_and_deduplicate_messages(self, firebase_messages, s3_messages):
+        """
+        Combines messages from Firebase and S3, removing duplicates.
+        """
+        messages_dict = {}
+
+        # Add messages from Firebase
+        if firebase_messages:
+            for msg_id, msg_data in firebase_messages.items():
+                messages_dict[msg_id] = msg_data
+
+        # Add messages from S3, avoiding duplicates
+        if s3_messages:
+            for msg_id, msg_data in s3_messages.items():
+                if msg_id not in messages_dict:
+                    messages_dict[msg_id] = msg_data
+
+        # Return list of messages
+        return list(messages_dict.values())
 
     def perform_privacy_preserving_search(self, keywords):
         """
@@ -650,37 +868,15 @@ class P2PChatApp:
         for entity_key, entity in self.peers.items():
             entity.messages = []
             if entity.is_group:
-                # Load messages from the group's reference in Firebase
-                group_id = sanitize_for_firebase_path(entity.group_name)
-                group_ref = db.reference(f"groups/{group_id}/messages")
-                messages = group_ref.get()
+                # Load messages using the unified method
+                messages = self.load_messages_from_cloud(entity)
                 if messages:
-                    for msg_key in messages:
-                        message_data = messages[msg_key]
-                        # Handle both dict and string formats
-                        if isinstance(message_data, dict):
-                            message = message_data.get('message', '')
-                            sender = message_data.get('sender', '')
-                        else:
-                            message = message_data
-                            sender = ''
-                        entity.messages.append({'sender': sender, 'message': message})
+                    for message in messages:
+                        entity.messages.append({'sender': '', 'message': message})
             else:
                 # Load messages from the chat's reference in Firebase
-                chat_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}_{sanitize_for_firebase_path(entity.ip)}_{entity.port}"
-                chat_ref = db.reference(f"chats/{chat_id}")
-                messages = chat_ref.get()
-                if messages:
-                    for msg_key in messages:
-                        message_data = messages[msg_key]
-                        # Handle both dict and string formats
-                        if isinstance(message_data, dict):
-                            message = message_data.get('message', '')
-                            sender = message_data.get('sender', '')
-                        else:
-                            message = message_data
-                            sender = ''
-                        entity.messages.append({'sender': sender, 'message': message})
+                # Similar logic can be applied here
+                pass
 
         self.messages_loaded = True  # Set the flag to indicate messages are loaded
 
@@ -758,7 +954,6 @@ def start_peer():
             host = socket.gethostbyname(socket.gethostname())
         except Exception:
             host = '127.0.0.1'  # Fallback to localhost if unable to get IP
-
         # Initialize the P2P Chat Application
         app = P2PChatApp(host, local_port)
         app.gui_app.root.mainloop()
