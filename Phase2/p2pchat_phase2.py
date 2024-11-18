@@ -23,10 +23,12 @@ import TkApp
 
 if not firebase_admin._apps:
     #cred = credentials.Certificate("psdproject-6e38f-firebase-adminsdk-icq10-3708af2f3d.json")
-    cred = credentials.Certificate("projetopsd-5a681-19d45fdfc118.json")
+    #cred = credentials.Certificate("projetopsd-5a681-19d45fdfc118.json")
+    cred = credentials.Certificate("projetopsd-6abec-firebase-adminsdk-tf6mp-1a2522b1cb.json")
     firebase_admin.initialize_app(cred, {
         #'databaseURL': 'https://psdproject-6e38f-default-rtdb.europe-west1.firebasedatabase.app/'
-        'databaseURL': 'https://projetopsd-5a681-default-rtdb.europe-west1.firebasedatabase.app/'
+        #'databaseURL': 'https://projetopsd-5a681-default-rtdb.europe-west1.firebasedatabase.app/'
+        'databaseURL': 'https://projetopsd-6abec-default-rtdb.europe-west1.firebasedatabase.app/'
     })
 
 # Directories to store peers list
@@ -54,6 +56,7 @@ class P2PChatApp:
         self.host = host  # Local IP address
         self.port = port  # Local port number
         self.peers = {}  # Dictionary to store connected peers and groups
+        self.peers_historic = {} # Dictionary to store all present and past connections to peers
         self.server_socket = None  # Server socket for listening
         self.messages_loaded = False  # Flag to indicate if messages have been loaded
 
@@ -117,7 +120,7 @@ class P2PChatApp:
         Saves the list of connected peers and groups to a JSON file inside the peersList folder.
         """
         peers_list = []
-        for key, entity in self.peers.items():
+        for key, entity in self.peers_historic.items(): #self.peers.items():
             if entity.is_group:
                 peers_list.append({
                     'is_group': True,
@@ -144,13 +147,13 @@ class P2PChatApp:
             for peer_info in peers_list:
                 if peer_info['is_group']:
                     group_name = peer_info['group_name']
-                    if group_name not in self.peers:
+                    if group_name not in self.peers_historic: #self.peers:
                         self.connect_to_group(group_name)
                 else:
                     ip = peer_info['ip']
                     port = peer_info['port']
                     # Attempt to connect to peer if not already connected
-                    if (ip, port) not in self.peers:
+                    if (ip, port) not in self.peers_historic: #self.peers:
                         threading.Thread(target=self.connect_to_peer, args=(ip, port), daemon=True).start()
         else:
             print("No previous peers to load.")
@@ -236,6 +239,7 @@ class P2PChatApp:
             # Create a ConnectionEntity to represent the connection
             entity = ConnectionEntity.ConnectionEntity(peer_ip, peer_listening_port, conn, peer_public_key, session_aes_key, is_group)
             self.peers[(peer_ip, peer_listening_port)] = entity  # Use tuple as key
+            self.peers_historic[(peer_ip, peer_listening_port)] = entity
             print(f"Connected: {peer_ip}:{peer_listening_port} as {'Group' if is_group else 'Peer'}")
 
             # Start a thread to receive messages from the peer
@@ -318,6 +322,7 @@ class P2PChatApp:
             # Create a ConnectionEntity for the group
             entity = ConnectionEntity.ConnectionEntity(None, None, None, None, None, is_group=True, group_name=group_name)
             self.peers[group_name] = entity
+            self.peers_historic[group_name] = entity
             # Start a thread to receive messages from the group
             threading.Thread(target=self.receive_messages, args=(entity,), daemon=True).start()
             messagebox.showinfo("Connected to Group", f"Connected to group '{group_name}'")
@@ -383,6 +388,7 @@ class P2PChatApp:
             # Create a ConnectionEntity to represent the connection
             entity = ConnectionEntity.ConnectionEntity(peer_ip, peer_listening_port, sock, peer_public_key, session_aes_key, is_group)
             self.peers[(peer_ip, peer_port)] = entity  # Use tuple as key
+            self.peers_historic[(peer_ip, peer_port)] = entity
             # Start a thread to receive messages from the peer
             threading.Thread(target=self.receive_messages, args=(entity,), daemon=True).start()
             print(f"Connected to {peer_ip}:{peer_port} as {'Group' if is_group else 'Peer'}")
@@ -572,8 +578,21 @@ class P2PChatApp:
             user_ref.update({'topics': ['None']})
             print("No topics selected, placeholder 'None' added.")
 
+        # Verify if the user's groups topics that he is in are the same as the topics that he has,
+        # in case he is in a group that has a topic that the user doesn't have then the connection with that group is closed
+        user_groups = [group for group in self.peers if group != 'You' and self.peers[group].is_group]
+        for group in user_groups:
+            group_ref = db.reference(f"groups/{sanitize_for_firebase_path(group)}")
+            group_data = group_ref.get()
+            if group_data:
+                group_topic = group_data.get('topic')
+                if group_topic not in selected_topics:
+                    print(f"Closing connection with group '{group}' as it is in topic '{group_topic}' that you don't have anymore.")
+                    del self.peers[group]
+                    del self.peers_historic[group]
+
         messagebox.showinfo("Topics Saved", "Your topics of interest have been saved.")
-        self.setup_main_menu()
+        self.gui_app.setup_main_menu()
 
 
     def decrypt_message(self, encrypted_message, aes_key):
