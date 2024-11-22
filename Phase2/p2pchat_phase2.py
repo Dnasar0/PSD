@@ -27,19 +27,78 @@ import boto3
 
 # Import Shamir's Secret Sharing library
 from secretsharing import PlaintextToHexSecretSharer
+from sslib import shamir
+from sslib.randomness import UrandomReader
 
 import ConnectionEntity
 import TkApp
 
-if not firebase_admin._apps:
-    #cred = credentials.Certificate("psdproject-6e38f-firebase-adminsdk-icq10-3708af2f3d.json")
-    #cred = credentials.Certificate("projetopsd-5a681-19d45fdfc118.json")
-    cred = credentials.Certificate("projetopsd-6abec-firebase-adminsdk-tf6mp-1a2522b1cb.json")
-    firebase_admin.initialize_app(cred, {
-        #'databaseURL': 'https://psdproject-6e38f-default-rtdb.europe-west1.firebasedatabase.app/'
-        #'databaseURL': 'https://projetopsd-5a681-default-rtdb.europe-west1.firebasedatabase.app/'
-        'databaseURL': 'https://projetopsd-6abec-default-rtdb.europe-west1.firebasedatabase.app/'
-    })
+# Initialize Firebase and S3 clients
+def initialize_services():
+
+    # Initialize Firebase Admin SDK with credentials and database URL
+    if not firebase_admin._apps:
+        #cred = credentials.Certificate("psdproject-6e38f-firebase-adminsdk-icq10-3708af2f3d.json")
+        cred = credentials.Certificate("projetopsd-5a681-19d45fdfc118.json")
+        #cred = credentials.Certificate("projetopsd-6abec-firebase-adminsdk-tf6mp-1a2522b1cb.json")
+        firebase_admin.initialize_app(cred, {
+            #'databaseURL': 'https://psdproject-6e38f-default-rtdb.europe-west1.firebasedatabase.app/'
+            'databaseURL': 'https://projetopsd-5a681-default-rtdb.europe-west1.firebasedatabase.app/'
+            #'databaseURL': 'https://projetopsd-6abec-default-rtdb.europe-west1.firebasedatabase.app/'
+        })
+
+        # Initialize AWS S3 client
+        s3_client = boto3.client(
+            's3',
+            # Uncomment and set your AWS credentials if needed
+            #aws_access_key_id='AKIAZI2LGQDRWWJFA5RX',
+            aws_access_key_id='AKIAQR5EPGH6RTK32M56',
+            #aws_secret_access_key='mKUTuWpLUvlG16XfZj11KX50o+KUMHQ2FznhLvnx',
+            aws_secret_access_key='z4TCt1JyLPFeYoLEO/j7ei+550sMmuUdusoxPnSw',
+            region_name='us-east-1' #'us-east-1' 
+        )  
+
+    return s3_client
+
+# Function to check and create a user in both Firebase and AWS S3
+def create_user_in_both_services(host, port, s3_client, s3_bucket_name):
+    user_id = f"{sanitize_for_firebase_path(host)}_{port}"
+    
+    # 1. Check Firebase for the user
+    user_ref = db.reference(f"users/{user_id}")
+    try:
+        user_data = user_ref.get()
+        if not user_data:
+            # Create the user in Firebase
+            user_ref.set({
+                'topics': ['None']  # Initialize with an empty list
+            })
+            print(f"User created in Firebase: {user_id}")
+        else:
+            print(f"User already exists in Firebase: {user_id}")
+    except Exception as e:
+        print(f"Failed to interact with Firebase: {e}")
+    
+    # 2. Create the user in AWS S3
+    # We will store the user data as a JSON file in S3
+    user_data_s3 = {
+        'user_id': user_id,
+        'topics': ['None']  # Same initial topic as in Firebase
+    }
+    
+    try:
+        # Upload user data to AWS S3 as a JSON file
+        s3_key = f"users/{user_id}.json"
+        s3_client.put_object(
+            Bucket=s3_bucket_name,
+            Key=s3_key,
+            Body=json.dumps(user_data_s3),
+            ContentType='application/json'
+        )
+        print(f"User data uploaded to S3: {user_id}")
+    except Exception as e:
+        print(f"Failed to upload user data to S3: {e}")
+
 
 # Directories to store peers list
 PEERS_DIR = "peersList"
@@ -77,36 +136,13 @@ class P2PChatApp:
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo
         )
-        
-        user_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
-        user_ref = db.reference(f"users/{user_id}")
+        #self.s3_bucket_name = 'p2pchatpsd'  # Replace with your S3 bucket name
+        self.s3_bucket_name = 'projetopsd'  # Replace with your S3 bucket name        
 
-        try:
-            # Check if the user already exists in the database
-            user_data = user_ref.get()
-            print("User data retrieved:", user_data)
+        self.s3_client = initialize_services()
 
-            if not user_data:
-                # Create the user entry with host and port if it doesn't exist
-                user_ref.set({
-                    'topics': ['None']  # Initialize with an empty list
-                })
-                print("User entry created in the database.")
-            else:
-                print("User already exists in the database.")
-
-        except Exception as e:
-            print(f"Failed to interact with Firebase: {e}")        
-
-        # Initialize AWS S3 client
-        self.s3_bucket_name = 'p2pchatpsd'  # Replace with your S3 bucket name
-        self.s3_client = boto3.client(
-            's3',
-            # Uncomment and set your AWS credentials if needed
-            aws_access_key_id='AKIAZI2LGQDRWWJFA5RX',
-            aws_secret_access_key='mKUTuWpLUvlG16XfZj11KX50o+KUMHQ2FznhLvnx',
-            region_name='us-east-1' #'us-east-1' 
-        )
+        # Create or check user in both Firebase and AWS S3
+        create_user_in_both_services(self.host, self.port, self.s3_client, self.s3_bucket_name)
 
         # Initialize the TkApp class with the existing root instance
         self.gui_app = TkApp.TkApp(self, host, port)
@@ -295,6 +331,72 @@ class P2PChatApp:
         elif connection_type == 'group':
             # Do nothing here, as group connection is handled by the GUI
             pass
+        
+    def create_new_group(self):
+        """
+        Allows the user to create a new group in their topics of interest.
+        """
+        # Prompt for group name
+        group_name = simpledialog.askstring("New Group", "Enter the name of the new group:")
+        if not group_name:
+            return
+
+        # Get user's topics
+        user_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
+        user_ref = db.reference(f"users/{user_id}")
+        user_data = user_ref.get()
+        user_topics = user_data.get('topics', []) if user_data else []
+
+        # Prompt the user to select a topic for the new group from their topics of interest
+        if not user_topics:
+            messagebox.showerror("Error", "You have not selected any topics of interest.")
+            return
+
+        topic = simpledialog.askstring("Group Topic", "Select a topic for the new group:\n" + "\n".join(user_topics))
+        if not topic or topic not in user_topics:
+            messagebox.showerror("Error", "Invalid topic selected for the group.")
+            return
+
+        # Save the group topic to Firebase
+        group_id = sanitize_for_firebase_path(group_name)
+        group_ref = db.reference(f"groups/{group_id}")
+        group_data = group_ref.get()
+        if group_data:
+            messagebox.showerror("Error", f"The group '{group_name}' already exists.")
+            return
+
+        # Set the group topic in Firebase
+        group_ref.set({'topic': topic})
+        messagebox.showinfo("Group Created", f"Group '{group_name}' has been created.")
+
+        # Create the group in AWS S3
+        self.create_group_in_s3(group_name, topic)
+
+        # Refresh the group list
+        self.gui_app.show_group_selection()
+  
+        
+    def create_group_in_s3(self, group_name, topic):
+        """
+        Stores the group topic in AWS S3, creating a group if it doesn't exist.
+        """
+        group_data = {
+            'group_name': group_name,
+            'topic': topic
+        }
+        
+        # Store group data in AWS S3 (group_name as the key)
+        try:
+            s3_key = f"groups/{group_name}.json"
+            self.s3_client.put_object(
+                Bucket=self.s3_bucket_name,
+                Key=s3_key,
+                Body=json.dumps(group_data),
+                ContentType='application/json'
+            )
+            print(f"Group '{group_name}' created in S3 with topic '{topic}'")
+        except Exception as e:
+            print(f"Failed to create group in S3: {e}")             
 
     def connect_to_group(self, group_name):
         """
@@ -310,7 +412,7 @@ class P2PChatApp:
         group_id = sanitize_for_firebase_path(group_name)
         group_ref = db.reference(f"groups/{group_id}")
         group_data = group_ref.get()
-        group_topic = group_data.get('topic') if group_data else None
+        group_topic = group_data.get('topic') if group_data else None        
 
         if not group_topic:
             # If the group doesn't exist yet, prompt the user to set the topic for the new group
@@ -327,7 +429,7 @@ class P2PChatApp:
 
             # Save the group topic to Firebase
             group_ref.set({'topic': topic})
-            group_topic = topic  # Set group_topic for access check
+            group_topic = topic  # Set group_topic for access check          
 
             # Generate a group key and distribute shares using Shamir's Secret Sharing
             self.generate_and_distribute_group_key(group_name, group_ref)
@@ -354,6 +456,7 @@ class P2PChatApp:
             self.gui_app.setup_main_menu()
         else:
             messagebox.showinfo("Info", f"Already connected to group '{group_name}'")
+              
 
     def generate_and_distribute_group_key(self, group_name, group_ref):
         """
@@ -711,6 +814,9 @@ class P2PChatApp:
             # If no topics are selected, add 'None' to keep the user entry alive in the database
             user_ref.update({'topics': ['None']})
             print("No topics selected, placeholder 'None' added.")
+            
+        # After saving to Firebase, also save to AWS S3
+        self.update_user_topics_in_s3(user_id, selected_topics)            
 
         # Verify if the user's groups topics that he is in are the same as the topics that he has,
         # in case he is in a group that has a topic that the user doesn't have then the connection with that group is closed
@@ -727,7 +833,28 @@ class P2PChatApp:
 
         messagebox.showinfo("Topics Saved", "Your topics of interest have been saved.")
         self.gui_app.setup_main_menu()
+        
+    def update_user_topics_in_s3(self, user_id, selected_topics):
+        """
+        Updates the user's topics in AWS S3 after the topics are saved to Firebase.
+        """
+        user_data = {
+            'user_id': user_id,
+            'topics': selected_topics
+        }
 
+        try:
+            # Store user data in S3 (using user_id as the key)
+            s3_key = f"users/{user_id}.json"
+            self.s3_client.put_object(
+                Bucket=self.s3_bucket_name,
+                Key=s3_key,
+                Body=json.dumps(user_data),
+                ContentType='application/json'
+            )
+            print(f"User topics for '{user_id}' updated in S3.")
+        except Exception as e:
+            print(f"Failed to update user topics in S3: {e}")        
 
     def get_group_key(self, group_entity):
         """

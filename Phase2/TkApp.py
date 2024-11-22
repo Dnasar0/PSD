@@ -1,4 +1,5 @@
 # TkApp.py
+import json
 import os
 import tkinter as tk
 from tkinter import messagebox, simpledialog
@@ -75,15 +76,26 @@ class TkApp:
             cb = tk.Checkbutton(self.current_frame, text=topic, variable=var)
             cb.pack(anchor=tk.W)
 
-        # Load the user's existing topics from Firebase
+        # Attempt to load the user's existing topics from Firebase
         user_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
         user_ref = db.reference(f"users/{user_id}")
-        user_data = user_ref.get()
-        if user_data and 'topics' in user_data:
-            selected_topics = user_data['topics']
-            for topic in selected_topics:
-                if topic in self.topic_vars:
-                    self.topic_vars[topic].set(1)
+
+        try:
+            user_data = user_ref.get()
+            if user_data and 'topics' in user_data:
+                selected_topics = user_data['topics']
+            else:
+                selected_topics = []
+                raise Exception("No topics found in Firebase")
+        except Exception as e:
+            print(f"Error fetching topics from Firebase: {e}")
+            # If Firebase fails, try fetching from AWS S3
+            selected_topics = self.get_topics_from_s3(user_id)
+
+        # Now update the UI with the selected topics
+        for topic in selected_topics:
+            if topic in self.topic_vars:
+                self.topic_vars[topic].set(1)
 
         # Save button
         save_button = tk.Button(self.current_frame, text="Save", command=self.p2p.save_topics)
@@ -92,6 +104,24 @@ class TkApp:
         # Back button to return to main menu
         back_button = tk.Button(self.current_frame, text="Back", command=self.setup_main_menu)
         back_button.pack(pady=10)
+
+    def get_topics_from_s3(self, user_id):
+        """
+        Fetches the user's topics from AWS S3 if Firebase is unavailable.
+        """
+        try:
+            s3_key = f"users/{user_id}.json"
+            response = self.p2p.s3_client.get_object(
+                Bucket=self.p2p.s3_bucket_name,
+                Key=s3_key
+            )
+            topics_data = json.loads(response['Body'].read())
+            print(f"Fetched topics for user {user_id} from S3.")
+            return topics_data.get('topics', [])
+        except Exception as e:
+            print(f"Error fetching topics from S3: {e}")
+            messagebox.showerror("Error", "Unable to load topics from both Firebase and S3.")
+            return []
 
 
     def show_connection_inputs(self):
@@ -154,7 +184,8 @@ class TkApp:
 
     def show_group_selection(self):
         """
-        Displays a list of groups in the user's topics of interest.
+        Displays a list of group names in the user's topics of interest.
+        Checks both Firebase and AWS S3 and shows the one with more groups if they differ.
         """
         # Clear group_inputs_frame
         for widget in self.group_inputs_frame.winfo_children():
@@ -162,26 +193,42 @@ class TkApp:
 
         # Get user's topics
         user_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
-        user_ref = db.reference(f"users/{user_id}")
-        user_data = user_ref.get()
-        user_topics = user_data.get('topics', []) if user_data else []
+        
+        # Try to get user's topics from Firebase
+        try:
+            user_ref = db.reference(f"users/{user_id}")
+            user_data = user_ref.get()
+            user_topics = user_data.get('topics', []) if user_data else []
+        except Exception as e:
+            print(f"Error fetching user topics from Firebase: {e}")
+            # If Firebase fails, fall back to getting topics from S3
+            user_topics = self.get_topics_from_s3(user_id)
 
         if not user_topics:
             messagebox.showerror("Error", "You have not selected any topics of interest. Please select topics before connecting to groups.")
             return
 
-        # Get list of groups from Firebase
-        groups_ref = db.reference("groups")
-        groups_data = groups_ref.get()
-        available_groups = []
-        if groups_data:
-            for group_name, group_info in groups_data.items():
-                group_topic = group_info.get('topic')
-                if group_topic in user_topics:
-                    available_groups.append(group_name)
+        # Get group names from Firebase
+        firebase_groups = self.get_group_names_from_firebase(user_topics)
+        
+        # Get group names from S3
+        s3_groups = self.get_group_names_from_s3(user_topics)
 
+        # Compare the number of groups from Firebase and S3
+        if len(firebase_groups) > len(s3_groups):
+            print("Firebase has more groups. Displaying Firebase groups.")
+            available_groups = firebase_groups
+        elif len(firebase_groups) < len(s3_groups):
+            print("S3 has more groups. Displaying S3 groups.")
+            available_groups = s3_groups
+        else:
+            print("Both Firebase and S3 have the same number of groups. Displaying either.")
+            available_groups = firebase_groups  # Or s3_groups, as they're the same length
+
+        # Display the available groups (whether from Firebase or S3)
         label = tk.Label(self.group_inputs_frame, text="Select a Group:")
         label.pack()
+
         self.group_listbox = tk.Listbox(self.group_inputs_frame)
         if available_groups:
             for idx, group_name in enumerate(available_groups):
@@ -189,52 +236,66 @@ class TkApp:
         else:
             self.group_listbox.insert(0, "No groups available in your topics of interest.")
             self.group_listbox.config(state=tk.DISABLED)
+
         self.group_listbox.pack()
 
-        # Button to create new group
-        create_group_button = tk.Button(self.group_inputs_frame, text="Create New Group", command=self.create_new_group)
+        # Button to create a new group
+        create_group_button = tk.Button(self.group_inputs_frame, text="Create New Group", command=self.p2p.create_new_group)
         create_group_button.pack(pady=5)
 
         self.group_inputs_frame.pack()
 
-    def create_new_group(self):
+    def get_group_names_from_firebase(self, user_topics):
         """
-        Allows the user to create a new group in their topics of interest.
+        Fetches group names from Firebase based on the user's topics.
         """
-        # Prompt for group name
-        group_name = simpledialog.askstring("New Group", "Enter the name of the new group:")
-        if not group_name:
-            return
+        groups = []
+        try:
+            groups_ref = db.reference("groups")
+            groups_data = groups_ref.get()  # Get all groups in Firebase
+            if groups_data:
+                for group_name, group_info in groups_data.items():
+                    group_topic = group_info.get('topic')  # Get the group topic
+                    if group_topic in user_topics:
+                        groups.append(group_name)  # Add group name if topic matches
+        except Exception as e:
+            print(f"Error fetching groups from Firebase: {e}")
+        return groups
 
-        # Get user's topics
-        user_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
-        user_ref = db.reference(f"users/{user_id}")
-        user_data = user_ref.get()
-        user_topics = user_data.get('topics', []) if user_data else []
+    def get_group_names_from_s3(self, user_topics):
+        """
+        Fetches group names from AWS S3 based on the user's topics.
+        """
+        groups = []
+        try:
+            # List all objects (files) in the 'groups' directory of the S3 bucket
+            s3_objects = self.p2p.s3_client.list_objects_v2(
+                Bucket=self.p2p.s3_bucket_name,
+                Prefix="groups/"
+            )
 
-        # Prompt the user to select a topic for the new group from their topics of interest
-        if not user_topics:
-            messagebox.showerror("Error", "You have not selected any topics of interest.")
-            return
+            # Check if there are any objects in the S3 bucket
+            if 'Contents' in s3_objects:
+                for obj in s3_objects['Contents']:
+                    group_name = obj['Key'].replace("groups/", "").replace(".json", "")  # Get the group name from the filename
+                    s3_key = obj['Key']  # The S3 object key (filename)
 
-        topic = simpledialog.askstring("Group Topic", "Select a topic for the new group:\n" + "\n".join(user_topics))
-        if not topic or topic not in user_topics:
-            messagebox.showerror("Error", "Invalid topic selected for the group.")
-            return
+                    # Fetch the group data from S3
+                    response = self.p2p.s3_client.get_object(
+                        Bucket=self.p2p.s3_bucket_name,
+                        Key=s3_key
+                    )
+                    group_data = json.loads(response['Body'].read())
+                    group_topic = group_data.get('topic')  # Get the group topic from the S3 file
 
-        # Save the group topic to Firebase
-        group_id = sanitize_for_firebase_path(group_name)
-        group_ref = db.reference(f"groups/{group_id}")
-        group_data = group_ref.get()
-        if group_data:
-            messagebox.showerror("Error", f"The group '{group_name}' already exists.")
-            return
+                    # Add the group name if the topic matches
+                    if group_topic in user_topics:
+                        groups.append(group_name)
+        except Exception as e:
+            print(f"Error fetching groups from S3: {e}")
+        return groups
+   
 
-        group_ref.set({'topic': topic})
-        messagebox.showinfo("Group Created", f"Group '{group_name}' has been created.")
-
-        # Refresh the group list
-        self.show_group_selection()
 
     def connect_to_selected_entity(self):
         """
