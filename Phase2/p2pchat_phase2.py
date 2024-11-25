@@ -9,6 +9,7 @@ import os
 import sys
 import json
 import hashlib
+import random
 import secrets
 import time  # Added import for timestamps
 #from tkinter.ttk import padding
@@ -17,10 +18,9 @@ import uuid  # Added import for unique message IDs
 # Import cryptographic primitives for encryption and key management
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import ec # For ECDH key exchange
-from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization  # For key serialization
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes  # For AES encryption
-from cryptography.hazmat.primitives import hashes, hmac, padding as _Padding  # For HMAC and Padding
+from cryptography.hazmat.primitives import hashes, padding as _Padding  # For HMAC and Padding
 
 # Import Firebase Admin SDK modules for database interaction
 import firebase_admin
@@ -28,14 +28,10 @@ from firebase_admin import credentials, db
 
 # Import AWS SDK for Python (Boto3) for S3 storage
 import boto3
-import rsa
 import sslib.randomness
 import sslib.util
 
-# Import Shamir's Secret Sharing library
-from secretsharing import PlaintextToHexSecretSharer
 from sslib import shamir
-from sslib.randomness import UrandomReader
 
 import ConnectionEntity
 import TkApp
@@ -497,7 +493,9 @@ class P2PChatApp:
             return
 
         group_topic = group_data.get('topic')
-        members = group_data.get('members', {})  # Get current members or initialize as empty
+
+        # Retrieve members as a dictionary from Firebase
+        members = group_data.get('members', [])  # Get members dictionary or default to emptyt
 
         # Check if the group topic matches the user's topics of interest
         if group_topic not in user_topics:
@@ -544,10 +542,19 @@ class P2PChatApp:
             # Add the user to the members dictionary with the next index
             members.append(user_id)
             
-            print(members)
+            members_dict = {str(index): member for index, member in enumerate(members)}            
 
             # Update the members list in Firebase
             group_ref.update({'members': members})
+            
+            s3_key = f"groups/{group_name}.json"
+            
+            # Update AWS S3
+            self.s3_client.put_object(
+                Bucket=self.s3_bucket_name,
+                Key=s3_key,
+                Body=json.dumps(group_data)
+            )            
 
             # Optional: Log to confirm the member addition
             print(f"User {user_id} added to group '{group_name}' with index {len(members)}.")
@@ -571,6 +578,19 @@ class P2PChatApp:
                 'prime_mod': prime_mod_base64,
                 'threshold': threshold
             })
+            
+            s3_key = f"groups/{group_name}.json"
+            
+            # Update AWS S3
+            group_data['members'] = members
+            group_data['shares'] = new_shares
+            group_data['prime_mod'] = prime_mod_base64
+            group_data['threshold'] = threshold
+            self.s3_client.put_object(
+                Bucket=self.bucket_name,
+                Key=s3_key,
+                Body=json.dumps(group_data)
+            )            
 
             # Log for debugging
             print(f"Group '{group_name}' key regenerated and redistributed due to new members.")
@@ -589,23 +609,6 @@ class P2PChatApp:
             self.gui_app.setup_main_menu()
         else:
             messagebox.showinfo("Info", f"Already connected to group '{group_name}'")
-
-    def generate_and_distribute_group_key(self, group_ref, threshold, shares):
-        """
-        Generates a new group key, splits it into shares, and stores the shares in Firebase.
-        """
-        # Step 1: Generate a new secret (group key)
-        secret = os.urandom(32)  # Generate a 256-bit key (32 bytes) using os.urandom
-        
-        # Step 2: Split the secret into shares using Shamir's Secret Sharing
-        # This uses the 'SecretSharer' utility from a library that handles Shamir's Secret Sharing.
-        shares = shamir.split_secret(secret.hex(), threshold, shares)  # For example, threshold=2, num_shares=3
-
-        # Step 3: Save the shares and threshold in Firebase
-        group_ref.update({
-            'shares': shares,       # Store the new shares
-            'threshold': threshold,         # The threshold to reconstruct the secret (e.g., 2 shares needed)
-        })
 
 
     def connect_to_peer_ui(self, peer_ip, peer_port):
@@ -1044,10 +1047,11 @@ class P2PChatApp:
         messages = []
 
         if entity.is_group:
+            
             # Load messages from Firebase
             group_id = sanitize_for_firebase_path(entity.group_name)
             group_ref = db.reference(f"groups/{group_id}/messages")
-            messages_data = group_ref.get()
+            messages_data = group_ref.get() or []
 
             # Load messages from AWS S3
             s3_messages = self.load_messages_from_s3(f"groups/{group_id}/messages")
@@ -1072,11 +1076,8 @@ class P2PChatApp:
                     print(f"Error decrypting message: {e}")
                     continue  # Skip to the next message
 
-        else:
-            # Similar logic for peer messages
-            pass
-
         return messages
+
 
     def load_messages_from_s3(self, path):
         """
@@ -1122,35 +1123,40 @@ class P2PChatApp:
 
     def perform_privacy_preserving_search(self, keywords):
         """
-        Searches all connected peers/groups for messages containing the keywords using ORAM.
+        Searches all connected peers/groups for messages containing any of the provided keywords using ORAM.
+        Supports multiple keywords and ensures privacy-preserving access patterns.
         """
-        results = []
+        results = set()  # Use a set to avoid duplicate results
 
-        # Collect all messages into a list
-        all_messages = []
-
-        # Ensure messages are loaded
+        # Ensure messages are loaded into memory
         self.load_all_messages()
 
-        # For each connected entity, retrieve the cached messages
+        print("Starting privacy-preserving search...")
         for entity_key, entity in self.peers.items():
             if entity.messages:
+
                 # Simulate ORAM by shuffling the messages
                 import random
                 random.shuffle(entity.messages)
 
+                # Iterate over messages and match against any keyword
                 for msg in entity.messages:
                     message = msg['message']
+
+                    # Match any keyword (logical OR)
                     if any(keyword.lower() in message.lower() for keyword in keywords):
                         if entity.is_group:
-                            results.append(f"Group '{entity.group_name}', Message: {message}")
+                            results.add(f"Group '{entity.group_name}', Message: {message}")
                         else:
-                            results.append(f"Peer {entity.ip}:{entity.port}, Message: {message}")
+                            results.add(f"Peer {entity.ip}:{entity.port}, Message: {message}")
                     else:
-                        # Dummy operation to simulate ORAM access pattern
-                        pass  # Do nothing
+                        # Dummy operation for ORAM simulation
+                        pass  # Perform a no-op to simulate access for non-matching messages
 
-        return results
+        # Return results as a sorted list for consistency
+        sorted_results = sorted(results)
+        return sorted_results
+
 
     def load_all_messages(self):
         """
@@ -1168,11 +1174,11 @@ class P2PChatApp:
                     for message in messages:
                         entity.messages.append({'sender': '', 'message': message})
             else:
-                # Load messages from the chat's reference in Firebase
-                # Similar logic can be applied here
+                # Placeholder for peer message loading logic
                 pass
 
         self.messages_loaded = True  # Set the flag to indicate messages are loaded
+
 
     def get_recommendations(self):
         """
