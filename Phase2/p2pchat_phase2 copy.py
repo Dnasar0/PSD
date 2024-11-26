@@ -63,52 +63,71 @@ def initialize_services():
 
     return s3_client
 
-# Function to check and create a user in both Firebase and AWS S3
-def create_user_in_both_services(host, port, s3_client, s3_bucket_name, public_key):
+def create_user_in_both_services(
+    host, 
+    port, 
+    s3_client, 
+    s3_buckets,  # List of bucket names
+    fb_replicas,  # List of Firebase database references
+    public_key
+):
+    """
+    Creates a user in multiple Firebase replicas and multiple S3 buckets with Shamir's Secret Sharing for the public key.
+    """
     user_id = f"{sanitize_for_firebase_path(host)}_{port}"
-        
+
+    # Convert public key to a big integer (or byte representation)
     public_key_pem = public_key.public_bytes(
-            encoding = serialization.Encoding.PEM,
-            format=  serialization.PublicFormat.SubjectPublicKeyInfo)
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    public_key_bytes = bytes.fromhex(public_key_pem.hex())  # Convert to bytes
+
+    # Shamir's Secret Sharing parameters
+    n = len(s3_buckets)  # Total number of shares
+    t = n // 2 + 1  # Threshold: Minimum shares required to reconstruct
+
+    # Split the public key into shares
+    shares = shamir.split_secret(public_key_bytes, t, n)
     
-    
-    public_key_base64 = base64.b64encode(public_key_pem).decode('utf-8')
-    
-    # 1. Check Firebase for the user
-    user_ref = db.reference(f"users/{user_id}")
-    try:
-        user_data = user_ref.get()
-        if not user_data:
-            # Create the user in Firebase
-            user_ref.set({
-                'topics': ['None'],  # Initialize with an empty list
-                'public_key': public_key_base64  # Store the encoded public key
-            })
-            print(f"User created in Firebase: {user_id}")
-        else:
-            print(f"User already exists in Firebase: {user_id}")
-    except Exception as e:
-        print(f"Failed to interact with Firebase: {e}")
-    
-    # 2. Create the user in AWS S3
-    # We will store the user data as a JSON file in S3
-    user_data_s3 = {
-        'topics': ['None'],  # Same initial topic as in Firebase
-        'public_key': public_key_base64  # Store the encoded public key
+    prime_mod = bytes_to_base64(shares['prime_mod'])
+
+    # User data to store
+    base_user_data = {
+        'topics': ['None'],
+        'prime': prime_mod,
+        'threshold': t
     }
-    
-    try:
-        # Upload user data to AWS S3 as a JSON file
-        s3_key = f"users/{user_id}.json"
-        s3_client.put_object(
-            Bucket=s3_bucket_name,
-            Key=s3_key,
-            Body=json.dumps(user_data_s3),
-            ContentType='application/json'
-        )
-        print(f"User data uploaded to S3: {user_id}")
-    except Exception as e:
-        print(f"Failed to upload user data to S3: {e}")
+
+    # Store data in all Firebase replicas
+    for i, replica in enumerate(fb_replicas):
+        try:
+            user_ref = db.reference(f"{replica}/users/{user_id}")
+            user_data = base_user_data.copy()
+            # Correctly access the public key share from the tuple and convert it to hex
+            user_data['public_key_share'] = shares['shares'][i][1].hex()  # Get the byte array from the tuple and convert it to hex
+            user_ref.set(user_data)
+            print(f"User created in Firebase {replica}: {user_id}")
+        except Exception as e:
+            print(f"Failed to create user in Firebase {replica}: {e}")
+
+    # Store data in all S3 buckets
+    for i, bucket_name in enumerate(s3_buckets):
+        try:
+            user_data = base_user_data.copy()
+            # Correctly access the public key share from the tuple and convert it to hex
+            user_data['public_key_share'] = shares['shares'][i][1].hex()  # Get the byte array from the tuple and convert it to hex
+            s3_key = f"users/{user_id}.json"
+            s3_client.put_object(
+                Bucket=bucket_name,
+                Key=s3_key,
+                Body=json.dumps(user_data),
+                ContentType='application/json'
+            )
+            print(f"User data uploaded to S3 bucket {bucket_name}: {user_id}")
+        except Exception as e:
+            print(f"Failed to upload user data to S3 bucket {bucket_name}: {e}")
+
 
 def decode_public_key(encoded_public_key):
     # Decode the Base64 encoded public key
@@ -144,29 +163,27 @@ def sanitize_for_firebase_path(s):
 # Main P2P Chat Application class
 class P2PChatApp:
     def __init__(self, host, port):
-        self.host = host  # Local IP address
-        self.port = port  # Local port number
-        self.peers = {}  # Dictionary to store connected peers and groups
-        self.peers_historic = {} # Dictionary to store all present and past connections to peers
-        self.server_socket = None  # Server socket for listening
-        self.messages_loaded = False  # Flag to indicate if messages have been loaded
+        self.host = host
+        self.port = port
+        self.peers = {}
+        self.peers_historic = {}
+        self.server_socket = None
+        self.messages_loaded = False
 
-        # Generate ECDH key pair for secure communication
+        # Storage configuration
+        self.s3_bucket_names = ['projetopsd1', 'projetopsd2', 'projetopsd3', 'projetopsd4']
+        self.firebase_refs = ['projetopsd1', 'projetopsd2', 'projetopsd3', 'projetopsd4']
+        self.s3_client = initialize_services()
+        
         self.private_key, self.public_key = self.generate_ecdh_key_pair()
+
+        self.initialize_user()
+
         # Serialize the public key to bytes for transmission
         self.public_key_bytes = self.public_key.public_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo
         )
-        
-        
-        #self.s3_bucket_name = 'p2pchatpsd'  # Replace with your S3 bucket name
-        self.s3_bucket_name = 'projetopsd'  # Replace with your S3 bucket name        
-
-        self.s3_client = initialize_services()
-
-        # Create or check user in both Firebase and AWS S3
-        create_user_in_both_services(self.host, self.port, self.s3_client, self.s3_bucket_name, self.public_key)
 
         # Initialize the TkApp class with the existing root instance
         self.gui_app = TkApp.TkApp(self, host, port)
@@ -179,6 +196,139 @@ class P2PChatApp:
 
         # Load peers from file to restore previous connections
         self.load_peers_from_file()
+        
+    def getFirebaseRefs(self):
+        return self.firebase_refs
+    
+    def getS3BucketNames(self):
+        return self.s3_bucket_names
+
+    def user_exists_in_databases(self, user_id):
+        """
+        Checks if the user exists in Firebase replicas or S3 buckets.
+        """
+        user_found = False
+
+        # Check Firebase replicas
+        for replica in self.firebase_refs:
+            try:
+                user_data = db.reference(f"{replica}/users/{user_id}").get()
+                if user_data:
+                    print(f"User found in Firebase {replica}: {user_id}")
+                    user_found = True
+            except Exception as e:
+                print(f"Error checking user in Firebase {replica}: {e}")
+
+        # Check S3 buckets
+        for bucket_name in self.s3_bucket_names:
+            try:
+                s3_key = f"users/{user_id}.json"
+                response = self.s3_client.get_object(Bucket=bucket_name, Key=s3_key)
+                user_data = json.loads(response['Body'].read().decode('utf-8'))
+                print(f"User found in S3 bucket {bucket_name}: {user_id}")
+                user_found = True
+            except self.s3_client.exceptions.NoSuchKey:
+                print(f"No user data found in S3 bucket {bucket_name}.")
+            except Exception as e:
+                print(f"Error checking user in S3 bucket {bucket_name}: {e}")
+
+        return user_found
+
+    def initialize_user(self):
+        """
+        Initializes the user by reconstructing the public key if possible,
+        or regenerating it if the user does not exist.
+        """
+        user_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
+
+        if self.user_exists_in_databases(user_id):
+
+            if self.reconstruct_public_key(user_id):
+                return
+            
+            # If user does not exist or reconstruction fails, regenerate keys
+            print("Reconstruction failed. Generating new key pair...")
+            self.private_key, self.public_key = self.generate_ecdh_key_pair()
+            create_user_in_both_services(
+                self.host, 
+                self.port, 
+                self.s3_client, 
+                self.s3_bucket_names, 
+                self.firebase_refs, 
+                self.public_key
+            )
+            
+        else:
+            # If user does not exist or reconstruction fails, regenerate keys
+            print("User does not exist. Adding to databases...")
+            create_user_in_both_services(
+                self.host, 
+                self.port, 
+                self.s3_client, 
+                self.s3_bucket_names, 
+                self.firebase_refs, 
+                self.public_key
+            )
+
+    def reconstruct_public_key(self, user_id):
+        """
+        Reconstruct the user's public key from available shares.
+        """
+        shares = []
+        prime = None
+        threshold = None
+
+        # Fetch shares from Firebase replicas
+        for replica in self.firebase_refs:
+            try:
+                user_data = db.reference(f"{replica}/users/{user_id}").get()
+                if user_data:
+                    shares.append(user_data['public_key_share'])
+                    prime = base64.b64encode(user_data['prime'].encode('utf-8'))
+                    threshold = user_data['threshold']
+                    
+            except Exception as e:
+                print(f"Failed to fetch data from Firebase {replica}: {e}")
+
+        # # Fetch shares from S3 buckets
+        # for bucket_name in self.s3_bucket_names:
+        #     try:
+        #         s3_key = f"users/{user_id}.json"
+        #         response = self.s3_client.get_object(Bucket=bucket_name, Key=s3_key)
+        #         user_data = json.loads(response['Body'].read().decode('utf-8'))
+        #         share = user_data['public_key_share']
+        #         if isinstance(share, str):  # Ensure share is base64-encoded string
+        #             shares.append(share)
+        #         prime = prime or int(user_data['prime'])
+        #         threshold = threshold or int(user_data['threshold'])
+        #     except Exception as e:
+        #         print(f"Failed to fetch data from S3 bucket {bucket_name}: {e}")
+
+        # Ensure we have enough shares for reconstruction
+        if len(shares) >= threshold:
+            try:
+
+                # Decode the shares
+                shares_list = []
+                for idx, share in enumerate(shares):
+                    share_bytes = base64.b64decode(share)  # Decode base64 share
+                    shares_list.append((idx, share_bytes))
+
+                # Rebuild the shared_data dictionary for use in Shamir's Secret Sharing
+                shared_data = {
+                    'shares': shares_list,
+                    'required_shares': threshold,
+                    'prime_mod': prime
+                }
+
+                # Attempt to recover the secret
+                return shamir.recover_secret(shared_data)
+            except Exception as e:
+                print(f"Failed to reconstruct the public key: {e}")
+        else:
+            print("Insufficient shares to reconstruct the public key.")
+
+        return None
 
     def get_peers_filename(self):
         """
@@ -381,7 +531,7 @@ class P2PChatApp:
         return encrypted_share    
             
 
-    def create_group_in_s3(self, group_name, topic, shares, threshold, prime_mod):
+    def create_group_in_s3(self, group_name, topic, shares, threshold, prime_mod, s3_bucket_name):
         """
         Stores the group data in AWS S3, creating a group if it doesn't exist.
         """
@@ -397,7 +547,7 @@ class P2PChatApp:
         try:
             s3_key = f"groups/{group_name}.json"
             self.s3_client.put_object(
-                Bucket=self.s3_bucket_name,
+                Bucket=s3_bucket_name,
                 Key=s3_key,
                 Body=json.dumps(group_data),
                 ContentType='application/json'
@@ -416,184 +566,198 @@ class P2PChatApp:
         if not group_name:
             return
 
-        # Fetch the user's topics from Firebase
+        # Fetch the user's topics from all Firebase replicas
         user_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
-        user_ref = db.reference(f"users/{user_id}")
-        user_data = user_ref.get()
-        user_topics = user_data.get('topics', []) if user_data else []
+        all_user_topics = set()  # Use a set to avoid duplicates
+        
+        for replica in self.firebase_refs:
+            try:
+                user_ref = db.reference(f"{replica}/users/{user_id}")
+                user_data = user_ref.get()
+                if user_data:
+                    all_user_topics.update(user_data.get('topics', []))
+            except Exception as e:
+                print(f"Failed to fetch topics from replica {replica}: {e}")
+                continue
 
-        # Let the user select a topic from their topics
-        if not user_topics:
+        # Ensure there are topics available
+        if not all_user_topics:
             messagebox.showerror("Error", "You don't have any topics defined. Please create topics first.")
             return
 
-        topic = simpledialog.askstring("Group Topic", f"Select a topic for the group (Your Topics: {', '.join(user_topics)})")
-        if not topic or topic not in user_topics:
+        # Let the user select a topic from the unified list
+        topic = simpledialog.askstring(
+            "Group Topic", f"Select a topic for the group (Your Topics: {', '.join(all_user_topics)})"
+        )
+        if not topic or topic not in all_user_topics:
             messagebox.showerror("Error", "Invalid topic selection.")
             return
 
-        # 2. Verify Creator's Public Key
-        public_key = user_data.get('public_key')
-        if not public_key:
-            messagebox.showerror("Error", "Your public key is missing. Cannot create the group.")
-            return
-
-        # 3. Store Group in Firebase
-        group_ref = db.reference(f"groups/{sanitize_for_firebase_path(group_name)}")
-        if group_ref.get():
-            messagebox.showerror("Error", f"Group '{group_name}' already exists.")
-            return
-
-        # Generate Group Key and Secret Shares
+        # 2. Generate Group Key and Secret Shares
         group_key = getrandbits(256)  # Random 256-bit group key
-        
         group_key_bytes = group_key.to_bytes(32, byteorder='big')  # 32 bytes for 256 bits
-        
         shared_data = shamir.split_secret(group_key_bytes, 2, 2)
-        
+
         shares = [(user_id, bytes_to_base64(share)) for user_id, share in shared_data['shares']]
-        
         threshold = shared_data['required_shares']
-        
         prime_mod = bytes_to_base64(shared_data['prime_mod'])
 
-        # Store group data in Firebase
-        group_data = {
-            'topic': topic,
-            'members': {},  # Creator's public key
-            'shares': shares,  # Convert share bytes to base64
-            'threshold': threshold,  # The required number of shares to reconstruct the secret
-            'prime_mod': prime_mod  # Convert prime_mod bytes to base64
-        }
-        
-        group_ref.set(group_data)
-        
-        self.create_group_in_s3(group_name, topic, shares, threshold, prime_mod)        
+        # 3. Store Group in Firebase
+        for replica in self.firebase_refs:
+            try:
+                group_ref = db.reference(f"{replica}/groups/{sanitize_for_firebase_path(group_name)}")
+                if group_ref.get():
+                    messagebox.showerror("Error", f"Group '{group_name}' already exists.")
+                    return
 
+                group_data = {
+                    'topic': topic,
+                    'members': {},  # Creator's public key
+                    'shares': shares,  # Convert share bytes to base64
+                    'threshold': threshold,  # The required number of shares to reconstruct the secret
+                    'prime_mod': prime_mod  # Convert prime_mod bytes to base64
+                }
+                group_ref.set(group_data)
+            except Exception as e:
+                print(f"Failed to create group in Firebase {replica}: {e}")
+                continue
+
+        # 4. Store Group in S3
+        for s3_bucket_name in self.s3_bucket_names:
+            try:
+                self.create_group_in_s3(group_name, topic, shares, threshold, prime_mod, s3_bucket_name)
+            except Exception as e:
+                print(f"Failed to create group in S3 bucket {s3_bucket_name}: {e}")
+                continue
+
+        # Confirm group creation
         messagebox.showinfo("Group Created", f"Group '{group_name}' has been created.")
+
 
     def connect_to_group(self, group_name):
         """
         Connects to a group chat by name, ensures the user is added to the group's members,
         and checks if the user has access to the group based on topics and secret shares.
         """
-        # Get the user's topics of interest from Firebase
-        user_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
-        user_ref = db.reference(f"users/{user_id}")
-        user_data = user_ref.get()
-        user_topics = user_data.get('topics', []) if user_data else []
+        
+        for replica,s3_bucket_name in zip(self.firebase_refs, self.s3_bucket_names):
+        
+            # Get the user's topics of interest from Firebase
+            user_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
+            user_ref = db.reference(f"{replica}/users/{user_id}")
+            user_data = user_ref.get()
+            user_topics = user_data.get('topics', []) if user_data else []
 
-        # Get the group's data (topic, shares, threshold, prime_mod, and members) from Firebase
-        group_id = sanitize_for_firebase_path(group_name)
-        group_ref = db.reference(f"groups/{group_id}")
-        group_data = group_ref.get()
+            # Get the group's data (topic, shares, threshold, prime_mod, and members) from Firebase
+            group_id = sanitize_for_firebase_path(group_name)
+            group_ref = db.reference(f"{replica}/groups/{group_id}")
+            group_data = group_ref.get()
 
-        if not group_data:
-            messagebox.showerror("Error", f"Group '{group_name}' does not exist.")
-            return
-
-        group_topic = group_data.get('topic')
-
-        # Retrieve members as a dictionary from Firebase
-        members = group_data.get('members', [])  # Get members dictionary or default to emptyt
-
-        # Check if the group topic matches the user's topics of interest
-        if group_topic not in user_topics:
-            messagebox.showerror("Access Denied", f"You do not have access to the group '{group_name}' as it is not in your topics of interest.")
-            return
-
-        # Ensure the group key can be reconstructed or regenerated
-        if 'shares' in group_data and 'threshold' in group_data and 'prime_mod' in group_data:
-            shares = group_data['shares']  # This is a list of (counter, share)
-            threshold = group_data['threshold']
-            prime_mod_base64 = group_data['prime_mod']
-
-            # Decode the prime_mod from Base64 back to bytes
-            prime_mod = base64.b64decode(prime_mod_base64)
-
-            # Rebuild the shares list
-            shares_list = []
-            for counter, share_base64 in shares:
-                # Decode the shares from Base64 back to bytes
-                share_bytes = base64.b64decode(share_base64)
-                shares_list.append((counter, share_bytes))
-
-            # Rebuild the shared_data dictionary for use in Shamir's Secret Sharing
-            shared_data = {
-                'shares': shares_list,
-                'required_shares': threshold,
-                'prime_mod': prime_mod
-            }
-
-            # Attempt to recover the group key using the shares and threshold
-            group_key = shamir.recover_secret(shared_data)
-
-            if not group_key:
-                messagebox.showerror("Error", f"Failed to reconstruct group key for '{group_name}'.")
+            if not group_data:
+                messagebox.showerror("Error", f"Group '{group_name}' does not exist.")
                 return
-        else:
-            messagebox.showerror("Error", f"The group '{group_name}' does not have valid shares or a secret.")
-            return
-    
-    
-        # Check if the user is already a member
-        if user_id not in members:
 
-            # Add the user to the members dictionary with the next index
-            members.append(user_id)
-            
-            members_dict = {str(index): member for index, member in enumerate(members)}            
+            group_topic = group_data.get('topic')
 
-            # Update the members list in Firebase
-            group_ref.update({'members': members})
-            
-            s3_key = f"groups/{group_name}.json"
-            
-            # Update AWS S3
-            self.s3_client.put_object(
-                Bucket=self.s3_bucket_name,
-                Key=s3_key,
-                Body=json.dumps(group_data)
-            )            
+            # Retrieve members as a dictionary from Firebase
+            members = group_data.get('members', [])  # Get members dictionary or default to emptyt
 
-            # Optional: Log to confirm the member addition
-            print(f"User {user_id} added to group '{group_name}' with index {len(members)}.")
+            # Check if the group topic matches the user's topics of interest
+            if group_topic not in user_topics:
+                messagebox.showerror("Access Denied", f"You do not have access to the group '{group_name}' as it is not in your topics of interest.")
+                return
 
-        # Check if the number of members exceeds the number of shares
-        if len(members) > len(shares):
-            # Regenerate group key and redistribute shares
-            group_key = os.urandom(32)  # Generate a new 256-bit key
-            shared_data = shamir.split_secret(group_key, threshold, len(members))
+            # Ensure the group key can be reconstructed or regenerated
+            if 'shares' in group_data and 'threshold' in group_data and 'prime_mod' in group_data:
+                shares = group_data['shares']  # This is a list of (counter, share)
+                threshold = group_data['threshold']
+                prime_mod_base64 = group_data['prime_mod']
 
-            # Encode and store the new shares
-            new_shares = [
-                (index, base64.b64encode(share).decode('utf-8'))
-                for index, share in shared_data['shares']
-            ]
-            prime_mod_base64 = base64.b64encode(shared_data['prime_mod']).decode('utf-8')
+                # Decode the prime_mod from Base64 back to bytes
+                prime_mod = base64.b64decode(prime_mod_base64)
 
-            # Update the group with new shares and prime_mod
-            group_ref.update({
-                'shares': new_shares,
-                'prime_mod': prime_mod_base64,
-                'threshold': threshold
-            })
-            
-            s3_key = f"groups/{group_name}.json"
-            
-            # Update AWS S3
-            group_data['members'] = members
-            group_data['shares'] = new_shares
-            group_data['prime_mod'] = prime_mod_base64
-            group_data['threshold'] = threshold
-            self.s3_client.put_object(
-                Bucket=self.bucket_name,
-                Key=s3_key,
-                Body=json.dumps(group_data)
-            )            
+                # Rebuild the shares list
+                shares_list = []
+                for counter, share_base64 in shares:
+                    # Decode the shares from Base64 back to bytes
+                    share_bytes = base64.b64decode(share_base64)
+                    shares_list.append((counter, share_bytes))
 
-            # Log for debugging
-            print(f"Group '{group_name}' key regenerated and redistributed due to new members.")
+                # Rebuild the shared_data dictionary for use in Shamir's Secret Sharing
+                shared_data = {
+                    'shares': shares_list,
+                    'required_shares': threshold,
+                    'prime_mod': prime_mod
+                }
+
+                # Attempt to recover the group key using the shares and threshold
+                group_key = shamir.recover_secret(shared_data)
+
+                if not group_key:
+                    messagebox.showerror("Error", f"Failed to reconstruct group key for '{group_name}'.")
+                    return
+            else:
+                messagebox.showerror("Error", f"The group '{group_name}' does not have valid shares or a secret.")
+                return
+        
+            # Check if the user is already a member
+            if user_id not in members:
+
+                # Add the user to the members dictionary with the next index
+                members.append(user_id)         
+                
+                group_data['members'] = members
+
+                # Update the members list in Firebase
+                group_ref.update({'members': members})
+                
+                s3_key = f"groups/{group_name}.json"
+                
+                # Update AWS S3
+                self.s3_client.put_object(
+                    Bucket=s3_bucket_name,
+                    Key=s3_key,
+                    Body=json.dumps(group_data)
+                )            
+
+                # Optional: Log to confirm the member addition
+                print(f"User {user_id} added to group '{group_name}' with index {len(members)}.")
+
+            # Check if the number of members exceeds the number of shares
+            if len(members) > len(shares):
+                # Regenerate group key and redistribute shares
+                group_key = os.urandom(32)  # Generate a new 256-bit key
+                shared_data = shamir.split_secret(group_key, threshold, len(members))
+
+                # Encode and store the new shares
+                new_shares = [
+                    (index, base64.b64encode(share).decode('utf-8'))
+                    for index, share in shared_data['shares']
+                ]
+                prime_mod_base64 = base64.b64encode(shared_data['prime_mod']).decode('utf-8')
+
+                # Update the group with new shares and prime_mod
+                group_ref.update({
+                    'shares': new_shares,
+                    'prime_mod': prime_mod_base64,
+                    'threshold': threshold
+                })
+                
+                s3_key = f"groups/{group_name}.json"
+                
+                # Update AWS S3
+                group_data['members'] = members
+                group_data['shares'] = new_shares
+                group_data['prime_mod'] = prime_mod_base64
+                group_data['threshold'] = threshold
+                self.s3_client.put_object(
+                    Bucket=s3_bucket_name,
+                    Key=s3_key,
+                    Body=json.dumps(group_data)
+                )            
+
+                # Log for debugging
+                print(f"Group '{group_name}' key regenerated and redistributed due to new members.")
 
         # Proceed to connect to the group
         if group_name not in self.peers:
@@ -978,52 +1142,59 @@ class P2PChatApp:
         """
         selected_topics = [topic for topic, var in self.gui_app.topic_vars.items() if var.get() == 1]
         user_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
-        user_ref = db.reference(f"users/{user_id}")
-        user_data = user_ref.get()
+        
+        for replica in self.firebase_refs:
+        
+            user_ref = db.reference(f"{replica}/users/{user_id}")
+            user_data = user_ref.get()
 
-        if selected_topics:
+            if selected_topics:
 
-            if user_data and 'topics' in user_data and 'None' in user_data['topics']:
-                current_topics = [topic for topic in user_data['topics'] if topic != 'None']
-                current_topics.extend(selected_topics)
+                if user_data and 'topics' in user_data and 'None' in user_data['topics']:
+                    current_topics = [topic for topic in user_data['topics'] if topic != 'None']
+                    current_topics.extend(selected_topics)
 
-                user_ref.update({'topics': list(set(current_topics))})
+                    user_ref.update({'topics': list(set(current_topics))})
+                else:
+                    # Just update with selected topics if 'None' isn't present
+                    user_ref.update({'topics': selected_topics})
+                print("Topics saved:", selected_topics)
             else:
-                # Just update with selected topics if 'None' isn't present
-                user_ref.update({'topics': selected_topics})
-            print("Topics saved:", selected_topics)
-        else:
-            # If no topics are selected, add 'None' to keep the user entry alive in the database
-            user_ref.update({'topics': ['None']})
-            print("No topics selected, placeholder 'None' added.")
+                # If no topics are selected, add 'None' to keep the user entry alive in the database
+                user_ref.update({'topics': ['None']})
+                print("No topics selected, placeholder 'None' added.")
             
-        # After saving to Firebase, also save to AWS S3
-        self.update_user_topics_in_s3(user_id, selected_topics)            
+            
+        for s3_bucket_name in self.s3_bucket_names:
+            
+            # After saving to Firebase, also save to AWS S3
+            self.update_user_topics_in_s3(user_id, selected_topics, s3_bucket_name)            
 
         # Verify if the user's groups topics that he is in are the same as the topics that he has,
         # in case he is in a group that has a topic that the user doesn't have then the connection with that group is closed
         user_groups = [group for group in self.peers if group != 'You' and self.peers[group].is_group]
         for group in user_groups:
-            group_ref = db.reference(f"groups/{sanitize_for_firebase_path(group)}")
-            group_data = group_ref.get()
-            if group_data:
-                group_topic = group_data.get('topic')
-                if group_topic not in selected_topics:
-                    print(f"Closing connection with group '{group}' as it is in topic '{group_topic}' that you don't have anymore.")
-                    del self.peers[group]
-                    del self.peers_historic[group]
+            for replica in self.firebase_refs:
+                group_ref = db.reference(f"{replica}/groups/{sanitize_for_firebase_path(group)}")
+                group_data = group_ref.get()
+                if group_data:
+                    group_topic = group_data.get('topic')
+                    if group_topic not in selected_topics:
+                        print(f"Closing connection with group '{group}' as it is in topic '{group_topic}' that you don't have anymore.")
+                        del self.peers[group]
+                        del self.peers_historic[group]
 
         messagebox.showinfo("Topics Saved", "Your topics of interest have been saved.")
         self.gui_app.setup_main_menu()
         
-    def update_user_topics_in_s3(self, user_id, selected_topics):
+    def update_user_topics_in_s3(self, user_id, selected_topics, s3_bucket_name):
         """
         Updates only the user's topics in AWS S3.
         """
         try:
             # Fetch the existing user data from S3
             s3_key = f"users/{user_id}.json"
-            response = self.s3_client.get_object(Bucket=self.s3_bucket_name, Key=s3_key)
+            response = self.s3_client.get_object(Bucket=s3_bucket_name, Key=s3_key)
             user_data = json.loads(response['Body'].read().decode('utf-8'))
 
             # Update the topics in the user data
@@ -1031,7 +1202,7 @@ class P2PChatApp:
 
             # Write the updated user data back to S3
             self.s3_client.put_object(
-                Bucket=self.s3_bucket_name,
+                Bucket=s3_bucket_name,
                 Key=s3_key,
                 Body=json.dumps(user_data),
                 ContentType='application/json'
