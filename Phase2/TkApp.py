@@ -78,24 +78,30 @@ class TkApp:
 
         # Attempt to load the user's existing topics from Firebase
         user_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
-        user_ref = db.reference(f"users/{user_id}")
+        
+        for replica in self.p2p.getFirebaseRefs():
+        
+            user_ref = db.reference(f"{replica}/users/{user_id}")
 
-        try:
-            user_data = user_ref.get()
-            if user_data and 'topics' in user_data:
-                selected_topics = user_data['topics']
-            else:
-                selected_topics = []
-                raise Exception("No topics found in Firebase")
-        except Exception as e:
-            print(f"Error fetching topics from Firebase: {e}")
-            # If Firebase fails, try fetching from AWS S3
-            selected_topics = self.get_topics_from_s3(user_id)
+            try:
+                user_data = user_ref.get()
+                if user_data and 'topics' in user_data:
+                    selected_topics = user_data['topics']
+                else:
+                    selected_topics = []
+                    raise Exception("No topics found in Firebase")
+            except Exception as e:
+                print(f"Error fetching topics from Firebase: {e}")
+                # If Firebase fails, try fetching from AWS S3
+                
+                for s3_bucket_name in self.p2p.getS3BucketNames():
+                
+                    selected_topics = self.get_topics_from_s3(user_id, s3_bucket_name)
 
-        # Now update the UI with the selected topics
-        for topic in selected_topics:
-            if topic in self.topic_vars:
-                self.topic_vars[topic].set(1)
+            # Now update the UI with the selected topics
+            for topic in selected_topics:
+                if topic in self.topic_vars:
+                    self.topic_vars[topic].set(1)
 
         # Save button
         save_button = tk.Button(self.current_frame, text="Save", command=self.p2p.save_topics)
@@ -105,14 +111,14 @@ class TkApp:
         back_button = tk.Button(self.current_frame, text="Back", command=self.setup_main_menu)
         back_button.pack(pady=10)
 
-    def get_topics_from_s3(self, user_id):
+    def get_topics_from_s3(self, user_id, s3_bucket_name):
         """
         Fetches the user's topics from AWS S3 if Firebase is unavailable.
         """
         try:
             s3_key = f"users/{user_id}.json"
             response = self.p2p.s3_client.get_object(
-                Bucket=self.p2p.s3_bucket_name,
+                Bucket=s3_bucket_name,
                 Key=s3_key
             )
             topics_data = json.loads(response['Body'].read())
@@ -194,15 +200,24 @@ class TkApp:
         # Get user's topics
         user_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
         
-        # Try to get user's topics from Firebase
-        try:
-            user_ref = db.reference(f"users/{user_id}")
-            user_data = user_ref.get()
-            user_topics = user_data.get('topics', []) if user_data else []
-        except Exception as e:
-            print(f"Error fetching user topics from Firebase: {e}")
-            # If Firebase fails, fall back to getting topics from S3
-            user_topics = self.get_topics_from_s3(user_id)
+        for replica in self.p2p.getFirebaseRefs():
+            
+                user_ref = db.reference(f"{replica}/users/{user_id}")
+    
+                try:
+                    user_data = user_ref.get()
+                    if user_data and 'topics' in user_data:
+                        user_topics = user_data['topics']
+                    else:
+                        user_topics = []
+                        raise Exception("No topics found in Firebase")
+                except Exception as e:
+                    print(f"Error fetching user topics from Firebase: {e}")
+                    # If Firebase fails, fall back to getting topics from S3
+                    
+                    for s3_bucket_name in self.p2p.getS3BucketNames():
+                        
+                        user_topics = self.get_topics_from_s3(user_id, s3_bucket_name)
 
         if not user_topics:
             messagebox.showerror("Error", "You have not selected any topics of interest. Please select topics before connecting to groups.")
@@ -250,52 +265,57 @@ class TkApp:
         Fetches group names from Firebase based on the user's topics.
         """
         groups = []
-        try:
-            groups_ref = db.reference("groups")
-            groups_data = groups_ref.get()  # Get all groups in Firebase
-            if groups_data:
-                for group_name, group_info in groups_data.items():
-                    group_topic = group_info.get('topic')  # Get the group topic
-                    if group_topic in user_topics:
-                        groups.append(group_name)  # Add group name if topic matches
-        except Exception as e:
-            print(f"Error fetching groups from Firebase: {e}")
-        return groups
+        
+        for replica in self.p2p.getFirebaseRefs():
+            
+            try:
+                groups_ref = db.reference(f"{replica}/groups")
+                groups_data = groups_ref.get()  # Get all groups in Firebase
+                if groups_data:
+                    for group_name, group_info in groups_data.items():
+                        group_topic = group_info.get('topic')  # Get the group topic
+                        if group_topic in user_topics:
+                            groups.append(group_name)  # Add group name if topic matches
+            except Exception as e:
+                print(f"Error fetching groups from Firebase: {e}")
+            return list(dict.fromkeys(groups)) 
 
     def get_group_names_from_s3(self, user_topics):
         """
         Fetches group names from AWS S3 based on the user's topics.
         """
         groups = []
-        try:
-            # List all objects (files) in the 'groups' directory of the S3 bucket
-            s3_objects = self.p2p.s3_client.list_objects_v2(
-                Bucket=self.p2p.s3_bucket_name,
-                Prefix="groups/"
-            )
+        
+        for s3_bucket_name in self.p2p.getS3BucketNames():
+        
+            try:
+                # List all objects (files) in the 'groups' directory of the S3 bucket
+                s3_objects = self.p2p.s3_client.list_objects_v2(
+                    Bucket=s3_bucket_name,
+                    Prefix="groups/"
+                )
 
-            # Check if there are any objects in the S3 bucket
-            if 'Contents' in s3_objects:
-                for obj in s3_objects['Contents']:
-                    group_name = obj['Key'].replace("groups/", "").replace(".json", "")  # Get the group name from the filename
-                    s3_key = obj['Key']  # The S3 object key (filename)
+                # Check if there are any objects in the S3 bucket
+                if 'Contents' in s3_objects:
+                    for obj in s3_objects['Contents']:
+                        group_name = obj['Key'].replace("groups/", "").replace(".json", "")  # Get the group name from the filename
+                        s3_key = obj['Key']  # The S3 object key (filename)
 
-                    # Fetch the group data from S3
-                    response = self.p2p.s3_client.get_object(
-                        Bucket=self.p2p.s3_bucket_name,
-                        Key=s3_key
-                    )
-                    group_data = json.loads(response['Body'].read())
-                    group_topic = group_data.get('topic')  # Get the group topic from the S3 file
+                        # Fetch the group data from S3
+                        response = self.p2p.s3_client.get_object(
+                            Bucket=s3_bucket_name,
+                            Key=s3_key
+                        )
+                        group_data = json.loads(response['Body'].read())
+                        group_topic = group_data.get('topic')  # Get the group topic from the S3 file
 
-                    # Add the group name if the topic matches
-                    if group_topic in user_topics:
-                        groups.append(group_name)
-        except Exception as e:
-            print(f"Error fetching groups from S3: {e}")
-        return groups
+                        # Add the group name if the topic matches
+                        if group_topic in user_topics:
+                            groups.append(group_name)
+            except Exception as e:
+                print(f"Error fetching groups from S3: {e}")
+        return list(dict.fromkeys(groups))
    
-
 
     def connect_to_selected_entity(self):
         """
