@@ -918,32 +918,43 @@ class P2PChatApp:
         """
         Listens to messages from the group in the cloud databases.
         """
-        group_id = sanitize_for_firebase_path(group_entity.group_name)
-        group_ref = db.reference(f"groups/{group_id}/messages")
+        processed_message_ids = set()  # Keep track of processed messages to avoid duplication
 
-        def listener(event):
-            # Event listener for new messages in the group
-            if event.data and event.event_type == 'put':
-                # Check if the event is for a new message
-                if event.path != '/':
-                    message_data = event.data
-                    # Decrypt the message
-                    message = self.decrypt_group_message(group_entity, message_data)
-                    # Get the sender
-                    if isinstance(message_data, dict):
-                        sender = message_data.get('sender', '')
-                    else:
-                        sender = ''
-                    if sender != f"{self.host}:{self.port}":
-                        if group_entity.chat_window:
-                            if sender:
-                                display_message = f"{sender}: {message}"
-                            else:
-                                display_message = message
-                            self.gui_app.update_chat_window(group_entity, display_message)
+        for replica in self.firebase_refs:
+            group_id = sanitize_for_firebase_path(group_entity.group_name)
+            group_ref = db.reference(f"{replica}/groups/{group_id}/messages")
 
-        # Start listening to the group messages
-        group_ref.listen(listener)
+            def listener(event):
+                # Event listener for new messages in the group
+                if event.data and event.event_type == 'put':
+                    # Ensure the event is for a new message
+                    if event.path != '/':
+                        message_data = event.data
+
+                        # Extract the `message_id` for deduplication
+                        message_id = message_data.get('message_id') if isinstance(message_data, dict) else None
+                        if not message_id or message_id in processed_message_ids:
+                            return  # Skip if message is already processed
+
+                        processed_message_ids.add(message_id)  # Mark this message as processed
+
+                        # Decrypt the message
+                        try:
+                            message = self.decrypt_group_message(group_entity, message_data)
+                            # Get the sender
+                            sender = message_data.get('sender', '') if isinstance(message_data, dict) else ''
+                            
+                            # Update chat window if sender isn't the current user
+                            if sender != f"{self.host}:{self.port}":
+                                if group_entity.chat_window:
+                                    display_message = f"{sender}: {message}" if sender else message
+                                    self.gui_app.update_chat_window(group_entity, display_message)
+                        except Exception as e:
+                            print(f"Error decrypting message: {e}")
+
+            # Start listening to the group messages
+            group_ref.listen(listener)
+
 
     def send_message(self, entity, message_var):
         """
@@ -955,12 +966,16 @@ class P2PChatApp:
 
             try:
                 if entity.is_group:
+                    # Update the chat window with the sent message
+                    self.gui_app.update_chat_window(entity, f"You: {message}")
                     # For groups, send the message to the cloud databases
                     encrypted_message = self.encrypt_group_message(entity, message)
                     # Convert encrypted message to hex string for JSON serialization
                     encrypted_message_hex = encrypted_message.hex()
                     self.save_chat_to_cloud(entity, f"{self.host}:{self.port}", encrypted_message_hex)
                 else:
+                    # Update the chat window with the sent message
+                    self.gui_app.update_chat_window(entity, f"You: {message}")
                     # For peers, send the message directly over the socket
                     encrypted_message = self.encrypt_message(message, entity.aes_key)
                     msg_length = len(encrypted_message)
@@ -969,8 +984,6 @@ class P2PChatApp:
                     print("Sent message")
                     self.save_chat_to_cloud(entity, f"You", message)
 
-                # Update the chat window with the sent message
-                self.gui_app.update_chat_window(entity, f"You: {message}")
             except Exception as e:
                 messagebox.showerror("Error", f"Could not send message: {e}")
 
@@ -982,30 +995,35 @@ class P2PChatApp:
         message_id = str(uuid.uuid4())  # Generate a unique message ID
         data = {'sender': sender, 'message': message, 'timestamp': timestamp, 'message_id': message_id}
 
-        if entity.is_group:
-            # Save to Firebase
-            group_id = sanitize_for_firebase_path(entity.group_name)
-            group_ref = db.reference(f"groups/{group_id}/messages")
-            group_ref.child(message_id).set(data)  # Use message_id as key
-            # Save to AWS S3
-            self.save_to_aws_s3(f"groups/{group_id}/messages/{message_id}.json", data)
-        else:
-            # Save to Firebase
-            chat_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}_{sanitize_for_firebase_path(entity.ip)}_{entity.port}"
-            chat_ref = db.reference(f"chats/{chat_id}")
-            chat_ref.child(message_id).set(data)
-            # Save to AWS S3
-            self.save_to_aws_s3(f"chats/{chat_id}/{message_id}.json", data)
+            
+        for replica, s3_bucket_name in zip(self.firebase_refs, self.s3_bucket_names):
+        
+            if entity.is_group:
+            
+                # Save to Firebase
+                group_id = sanitize_for_firebase_path(entity.group_name)
+                group_ref = db.reference(f"{replica}/groups/{group_id}/messages")
+                group_ref.child(message_id).set(data)  # Use message_id as key
+                #Save to AWS S3
+                self.save_to_aws_s3(f"groups/{group_id}/messages/{message_id}.json", data, s3_bucket_name)
+            else:
+                # Save to Firebase
+                chat_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}_{sanitize_for_firebase_path(entity.ip)}_{entity.port}"
+                chat_ref = db.reference(f"{replica}/chats/{chat_id}")
+                chat_ref.child(message_id).set(data)
+                # Save to AWS S3
+                self.save_to_aws_s3(f"chats/{chat_id}/{message_id}.json", data)
 
-    def save_to_aws_s3(self, path, data):
+    def save_to_aws_s3(self, path, data, s3_bucket_name):
         """
         Saves data to AWS S3 in JSON format.
         """
+
         key = f"{path}/{secrets.token_hex(16)}.json"
         # Ensure that data is JSON serializable
         json_data = json.dumps(data)
         self.s3_client.put_object(
-            Bucket=self.s3_bucket_name,
+            Bucket=s3_bucket_name,
             Key=key,
             Body=json_data
         )
@@ -1100,41 +1118,43 @@ class P2PChatApp:
         """
         Retrieves or reconstructs the group key using Shamir's Secret Sharing.
         """
-        group_id = sanitize_for_firebase_path(group_entity.group_name)
-        group_ref = db.reference(f"groups/{group_id}")
-        group_data = group_ref.get()
+        for replica in self.firebase_refs:
+        
+            group_id = sanitize_for_firebase_path(group_entity.group_name)
+            group_ref = db.reference(f"{replica}/groups/{group_id}")
+            group_data = group_ref.get()
 
-        # Check if the group key already exists in Firebase
-        group_key_hex = group_data.get('group_key')
-        if group_key_hex:
-            return group_key_hex  # Return the group key if it's already available
+            # Check if the group key already exists in Firebase
+            group_key_hex = group_data.get('group_key')
+            if group_key_hex:
+                return group_key_hex  # Return the group key if it's already available
 
-        # Reconstruct the key using SSS if shares are present
-        if 'shares' in group_data and 'threshold' in group_data and 'prime_mod' in group_data:
-            shares = group_data['shares']  # [(member_id, share_base64)]
-            threshold = group_data['threshold']
-            prime_mod = base64.b64decode(group_data['prime_mod'])
+            # Reconstruct the key using SSS if shares are present
+            if 'shares' in group_data and 'threshold' in group_data and 'prime_mod' in group_data:
+                shares = group_data['shares']  # [(member_id, share_base64)]
+                threshold = group_data['threshold']
+                prime_mod = base64.b64decode(group_data['prime_mod'])
 
-            # Decode shares from Base64
-            decoded_shares = [(int(member_id), base64.b64decode(share_base64)) for member_id, share_base64 in shares]
+                # Decode shares from Base64
+                decoded_shares = [(int(member_id), base64.b64decode(share_base64)) for member_id, share_base64 in shares]
 
-            # Ensure we have at least the required number of shares
-            if len(decoded_shares) < threshold:
-                raise ValueError(f"Not enough shares to reconstruct the key for '{group_entity.group_name}'.")
+                # Ensure we have at least the required number of shares
+                if len(decoded_shares) < threshold:
+                    raise ValueError(f"Not enough shares to reconstruct the key for '{group_entity.group_name}'.")
 
-            # Use SSS to reconstruct the group key
-            reconstructed_key = shamir.recover_secret({
-                "shares": decoded_shares[:threshold],
-                "prime_mod": prime_mod,
-                "required_shares": threshold
-            })
+                # Use SSS to reconstruct the group key
+                reconstructed_key = shamir.recover_secret({
+                    "shares": decoded_shares[:threshold],
+                    "prime_mod": prime_mod,
+                    "required_shares": threshold
+                })
 
-            # Store the reconstructed key back in Firebase for future use
-            group_key_hex = reconstructed_key.hex()
-            group_ref.update({"group_key": group_key_hex})
-            return group_key_hex
+                # Store the reconstructed key back in Firebase for future use
+                group_key_hex = reconstructed_key.hex()
+                group_ref.update({"group_key": group_key_hex})
+                return group_key_hex
 
-        raise ValueError(f"Unable to retrieve or reconstruct the group key for '{group_entity.group_name}'.")
+            raise ValueError(f"Unable to retrieve or reconstruct the group key for '{group_entity.group_name}'.")
 
     def save_topics(self):
         """
@@ -1219,19 +1239,21 @@ class P2PChatApp:
 
         if entity.is_group:
             
-            # Load messages from Firebase
-            group_id = sanitize_for_firebase_path(entity.group_name)
-            group_ref = db.reference(f"groups/{group_id}/messages")
-            messages_data = group_ref.get() or []
+            for replica, s3_bucket_name in zip(self.firebase_refs,self.s3_bucket_names):
+            
+                # Load messages from Firebase
+                group_id = sanitize_for_firebase_path(entity.group_name)
+                group_ref = db.reference(f"{replica}/groups/{group_id}/messages")
+                messages_data = group_ref.get() or []
 
-            # Load messages from AWS S3
-            s3_messages = self.load_messages_from_s3(f"groups/{group_id}/messages")
+                # Load messages from AWS S3
+                #s3_messages = self.load_messages_from_s3(f"groups/{group_id}/messages", s3_bucket_name)
 
-            # Combine messages
-            combined_messages = self.combine_and_deduplicate_messages(messages_data, s3_messages)
+                # Combine messages
+                combined_messages = self.combine_and_deduplicate_messages(messages_data, [])
 
-            # Sort messages by timestamp
-            sorted_messages = sorted(combined_messages, key=lambda x: x.get('timestamp', 0))
+                # Sort messages by timestamp
+                sorted_messages = sorted(combined_messages, key=lambda x: x.get('timestamp', 0))
 
             # Decrypt messages
             for message_data in sorted_messages:
@@ -1247,30 +1269,29 @@ class P2PChatApp:
                     print(f"Error decrypting message: {e}")
                     continue  # Skip to the next message
 
-        return messages
+            return messages
 
-
-    def load_messages_from_s3(self, path):
-        """
-        Loads messages from AWS S3.
-        """
-        import json
-        import os
-        messages = {}
-        response = self.s3_client.list_objects_v2(Bucket=self.s3_bucket_name, Prefix=path)
-        if 'Contents' in response:
-            for obj in response['Contents']:
-                obj_key = obj['Key']
-                obj_data = self.s3_client.get_object(Bucket=self.s3_bucket_name, Key=obj_key)
-                obj_body = obj_data['Body'].read().decode('utf-8')
-                message_data = json.loads(obj_body)
-                # Extract message ID from the key or from the message data
-                message_id = message_data.get('message_id')
-                if not message_id:
-                    # Try to extract message_id from the key
-                    message_id = os.path.basename(obj_key).replace('.json', '')
-                messages[message_id] = message_data
-        return messages
+    # def load_messages_from_s3(self, path, s3_bucket_name):
+    #     """
+    #     Loads messages from AWS S3.
+    #     """
+    #     import json
+    #     import os
+    #     messages = {}
+    #     response = self.s3_client.list_objects_v2(Bucket=s3_bucket_name, Prefix=path)
+    #     if 'Contents' in response:
+    #         for obj in response['Contents']:
+    #             obj_key = obj['Key']
+    #             obj_data = self.s3_client.get_object(Bucket=s3_bucket_name, Key=obj_key)
+    #             obj_body = obj_data['Body'].read().decode('utf-8')
+    #             message_data = json.loads(obj_body)
+    #             # Extract message ID from the key or from the message data
+    #             message_id = message_data.get('message_id')
+    #             if not message_id:
+    #                 # Try to extract message_id from the key
+    #                 message_id = os.path.basename(obj_key).replace('.json', '')
+    #             messages[message_id] = message_data
+    #     return messages
 
     def combine_and_deduplicate_messages(self, firebase_messages, s3_messages):
         """
