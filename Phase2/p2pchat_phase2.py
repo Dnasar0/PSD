@@ -904,7 +904,7 @@ class P2PChatApp:
                     if entity.chat_window:
                         self.gui_app.update_chat_window(entity, f"{entity.ip}:{entity.port}: {message}")
                     # Save the message to the cloud databases
-                    self.save_chat_to_cloud(entity, f"{entity.ip}:{entity.port}", message)
+                    self.save_chat_to_cloud(entity, f"{entity.ip}:{entity.port}", encrypted_message.hex())
 
                 except Exception as e:
                     print(f"Connection to {entity.ip}:{entity.port} closed: {e}")
@@ -972,17 +972,19 @@ class P2PChatApp:
                     encrypted_message = self.encrypt_group_message(entity, message)
                     # Convert encrypted message to hex string for JSON serialization
                     encrypted_message_hex = encrypted_message.hex()
+                    print("Grupo")
                     self.save_chat_to_cloud(entity, f"{self.host}:{self.port}", encrypted_message_hex)
                 else:
                     # Update the chat window with the sent message
                     self.gui_app.update_chat_window(entity, f"You: {message}")
                     # For peers, send the message directly over the socket
                     encrypted_message = self.encrypt_message(message, entity.aes_key)
+                    encrypted_message_hex = encrypted_message.hex()
                     msg_length = len(encrypted_message)
                     entity.connection.sendall(msg_length.to_bytes(4, byteorder='big'))
                     entity.connection.sendall(encrypted_message)
                     print("Sent message")
-                    self.save_chat_to_cloud(entity, f"You", message)
+                    self.save_chat_to_cloud(entity, f"You", encrypted_message_hex)
 
             except Exception as e:
                 messagebox.showerror("Error", f"Could not send message: {e}")
@@ -1012,7 +1014,7 @@ class P2PChatApp:
                 chat_ref = db.reference(f"{replica}/chats/{chat_id}")
                 chat_ref.child(message_id).set(data)
                 # Save to AWS S3
-                self.save_to_aws_s3(f"chats/{chat_id}/{message_id}.json", data)
+                self.save_to_aws_s3(f"chats/{chat_id}/{message_id}.json", data, s3_bucket_name)
 
     def save_to_aws_s3(self, path, data, s3_bucket_name):
         """
