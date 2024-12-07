@@ -169,6 +169,7 @@ class P2PChatApp:
         self.peers_historic = {}
         self.server_socket = None
         self.messages_loaded = False
+        self.aes_key = None
 
         # Storage configuration
         self.s3_bucket_names = ['projetopsd1', 'projetopsd2', 'projetopsd3', 'projetopsd4']
@@ -360,7 +361,8 @@ class P2PChatApp:
                 peers_list.append({
                     'is_group': False,
                     'ip': entity.ip,
-                    'port': entity.port
+                    'port': entity.port,
+                    'session_key' : entity.aes_key.hex() if entity.aes_key else None
                 })
         filename = self.get_peers_filename()
         with open(filename, 'w') as f:
@@ -384,9 +386,40 @@ class P2PChatApp:
                     port = peer_info['port']
                     # Attempt to connect to peer if not already connected
                     if (ip, port) not in self.peers_historic: #self.peers:
-                        threading.Thread(target=self.connect_to_peer, args=(ip, port), daemon=True).start()
+                        threading.Thread(target=self.connect_to_peer, args=(ip, port,True), daemon=True).start()
         else:
             print("No previous peers to load.")
+            
+    def retrieve_aes_key(self, peer_ip, peer_port):
+        """
+        Retrieve the AES session key for a specific peer from the peer list.
+        """
+        # Generate the filename for the peer list JSON
+        filepath = self.get_peers_filename()
+        
+
+        if not os.path.exists(filepath):
+            print(f"No peer list found at {filepath}")
+            return None
+
+        try:
+            # Load the peer list
+            with open(filepath, 'r') as f:
+                peers_list = json.load(f)
+
+            # Search for the matching peer in the list
+            for peer_info in peers_list:
+                if not peer_info['is_group'] and peer_info['ip'] == peer_ip and peer_info['port'] == peer_port:
+                    session_key = peer_info.get('session_key', None)
+                    if session_key:
+                        # Convert the session key back to bytes (if stored as hex or base64)
+                        return bytes.fromhex(session_key)  # Use appropriate decoding if necessary
+            print(f"Peer {peer_ip}:{peer_port} not found in peer list.")
+            return None
+        except Exception as e:
+            print(f"Error reading peer list: {e}")
+            return None            
+            
 
     def generate_ecdh_key_pair(self):
         """
@@ -442,46 +475,85 @@ class P2PChatApp:
         Processes new connections received from peers.
         """
         try:
-            # Exchange public keys with the peer for ECDH key exchange
-            peer_public_key_bytes = self.receive_all(conn)
-            peer_public_key = serialization.load_pem_public_key(peer_public_key_bytes, backend=default_backend())
-            print("Received peer's public key")
+            # Step 1: Receive handshake flag ("already_connected" or "new_connection")
+            handshake_flag = conn.recv(1024).decode()
+            if not handshake_flag:
+                raise Exception("Connection closed during handshake!")
+            print(f"Handshake flag received: {handshake_flag}")
 
-            # Send own public key to the peer
-            conn.sendall(self.public_key_bytes)
-            print("Sent own public key")
+            if handshake_flag == "already_connected":
+                
+                conn.sendall("ACK1".encode())
 
-            # Generate shared secret using ECDH and derive AES key
-            shared_key = self.private_key.exchange(ec.ECDH(), peer_public_key)
-            session_aes_key = derive_aes_key(shared_key)
+                # Step 3: Receive peer's port
+                peer_port_bytes = conn.recv(4)
+                if not peer_port_bytes:
+                    raise Exception("Connection closed while receiving peer's port!")
+                peer_port = int.from_bytes(peer_port_bytes, byteorder="big")
+                print(f"Received peer's port: {peer_port}")
 
-            # Receive connection type and listening port from the peer
+                # Step 4: Retrieve the session AES key
+                session_aes_key = self.retrieve_aes_key(peer_ip, peer_port)
+                if session_aes_key is None:
+                    raise Exception(f"Could not retrieve session key for {peer_ip}:{peer_port}")
+                print("Retrieved session AES key")
+            elif handshake_flag == "new_connection":
+                
+                conn.sendall("ACK0".encode())
+                # Step 2: Perform ECDH key exchange
+                # Receive peer's public key
+                peer_public_key_bytes = self.receive_all(conn)
+                peer_public_key = serialization.load_pem_public_key(peer_public_key_bytes, backend=default_backend())
+                print("Received peer's public key")
+
+                # Send own public key
+                conn.sendall(self.public_key_bytes)
+                print("Sent own public key")
+
+                # Generate shared secret and derive AES session key
+                shared_key = self.private_key.exchange(ec.ECDH(), peer_public_key)
+                session_aes_key = derive_aes_key(shared_key)
+                print("Generated new AES session key")
+
+                # Step 3: Receive peer's port
+                peer_port_bytes = conn.recv(4)
+                if not peer_port_bytes:
+                    raise Exception("Connection closed while receiving peer's port!")
+                peer_port = int.from_bytes(peer_port_bytes, byteorder="big")
+                print(f"Received peer's port: {peer_port}")
+            else:
+                raise Exception(f"Unknown handshake flag: {handshake_flag}")
+
+            # Step 5: Receive peer's connection type and listening port
             msg_length_bytes = conn.recv(4)
             if not msg_length_bytes:
-                raise Exception("Connection closed by peer!")
-            msg_length = int.from_bytes(msg_length_bytes, byteorder='big')
+                raise Exception("Connection closed while receiving connection type and port!")
+            msg_length = int.from_bytes(msg_length_bytes, byteorder="big")
             encrypted_info = self.receive_exact(conn, msg_length)
             info = self.decrypt_message(encrypted_info, session_aes_key)
             connection_type, peer_listening_port = info.split(',')
             peer_listening_port = int(peer_listening_port)
+            print(f"Received peer's connection type: {connection_type}, port: {peer_listening_port}")
 
-            # Send own connection type and listening port to the peer
+            # Step 6: Send own connection type and port to the peer
             my_info = f"peer,{self.port}"
             encrypted_info = self.encrypt_message(my_info, session_aes_key)
+            self.aes_key = session_aes_key
             msg_length = len(encrypted_info)
-            conn.sendall(msg_length.to_bytes(4, byteorder='big'))
+            conn.sendall(msg_length.to_bytes(4, byteorder="big"))
             conn.sendall(encrypted_info)
+            print("Sent connection type and port info")
 
-            # Determine if the connection is to a group or a peer
+            # Step 7: Determine if the connection is to a group or an individual
             is_group = (connection_type == 'group')
 
-            # Create a ConnectionEntity to represent the connection
-            entity = ConnectionEntity.ConnectionEntity(peer_ip, peer_listening_port, conn, peer_public_key, session_aes_key, is_group)
-            self.peers[(peer_ip, peer_listening_port)] = entity  # Use tuple as key
+            # Step 8: Create a `ConnectionEntity` to represent the connection
+            entity = ConnectionEntity.ConnectionEntity(peer_ip, peer_listening_port, conn, None, session_aes_key, is_group)
+            self.peers[(peer_ip, peer_listening_port)] = entity
             self.peers_historic[(peer_ip, peer_listening_port)] = entity
             print(f"Connected: {peer_ip}:{peer_listening_port} as {'Group' if is_group else 'Peer'}")
 
-            # Start a thread to receive messages from the peer
+            # Step 9: Start a thread to handle receiving messages from the peer
             threading.Thread(target=self.receive_messages, args=(entity,), daemon=True).start()
 
         except Exception as e:
@@ -788,62 +860,100 @@ class P2PChatApp:
             # Show an error message if the connection fails
             self.gui_app.root.after(0, lambda: messagebox.showerror("Connection Error", f"Could not connect to {peer_ip}:{peer_port}\nError: {e}"))
 
-    def connect_to_peer(self, peer_ip, peer_port):
+    def connect_to_peer(self, peer_ip, peer_port, already_connected=False):
         """
         Connects to a peer using the provided IP and port.
         """
         try:
-            # Create a socket and connect to the peer
+            # Step 1: Create a socket and connect to the peer
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.connect((peer_ip, peer_port))
 
-            # Send own public key to the peer
-            sock.sendall(self.public_key_bytes)
-            print("Sent own public key")
+            # Step 1: Send handshake flag
+            handshake_flag = "already_connected" if already_connected else "new_connection"
+            sock.sendall(handshake_flag.encode())  # Send as plain text
+            print(f"Sent handshake flag: {handshake_flag}")
 
-            # Receive peer's public key
-            peer_public_key_bytes = self.receive_all(sock)
-            peer_public_key = serialization.load_pem_public_key(peer_public_key_bytes, backend=default_backend())
-            print("Received peer's public key")
+            if already_connected:
+                
+                if sock.recv(4).decode() != "ACK1":
+                    raise Exception("Handshake failed!")
+                
+                print("Received ACK1")
 
-            # Generate shared secret using ECDH and derive AES key
-            shared_key = self.private_key.exchange(ec.ECDH(), peer_public_key)
-            session_aes_key = derive_aes_key(shared_key)
+                # Step 4: Send this peer's port to the other peer
+                sock.sendall(self.port.to_bytes(4, byteorder="big"))
+                print(f"Sent own port: {self.port}")
 
-            # Send own connection type and listening port to the peer
+                # Step 5: Attempt to retrieve the session AES key
+                session_aes_key = self.retrieve_aes_key(peer_ip, peer_port)
+                if session_aes_key is None:
+                    raise Exception(f"Could not retrieve session key for {peer_ip}:{peer_port}")
+                print("Retrieved session AES key")
+            else:
+                
+                if sock.recv(4).decode() != "ACK0":
+                    raise Exception("Handshake failed!")
+                
+                print("Received ACK0")
+                
+                # Step 3: Perform ECDH key exchange
+                # Send this peer's public key to the other peer
+                sock.sendall(self.public_key_bytes)
+                print("Sent own public key")
+
+                # Receive the other peer's public key
+                peer_public_key_bytes = self.receive_all(sock)
+                peer_public_key = serialization.load_pem_public_key(peer_public_key_bytes, backend=default_backend())
+                print("Received peer's public key")
+
+                # Generate the shared secret and derive the AES session key
+                shared_key = self.private_key.exchange(ec.ECDH(), peer_public_key)
+                session_aes_key = derive_aes_key(shared_key)
+                print("Generated new AES session key")
+
+                # Step 4: Send this peer's port to the other peer
+                sock.sendall(self.port.to_bytes(4, byteorder="big"))
+                print(f"Sent own port: {self.port}")
+
+            # Step 6: Send this peer's connection type and port to the other peer
             my_info = f"peer,{self.port}"
             encrypted_info = self.encrypt_message(my_info, session_aes_key)
             msg_length = len(encrypted_info)
-            sock.sendall(msg_length.to_bytes(4, byteorder='big'))
+            sock.sendall(msg_length.to_bytes(4, byteorder="big"))
             sock.sendall(encrypted_info)
+            print("Sent connection type and port info")
 
-            # Receive peer's connection type and listening port
+            # Step 7: Receive the other peer's connection type and port
             msg_length_bytes = sock.recv(4)
             if not msg_length_bytes:
                 raise Exception("Connection closed by peer!")
-            msg_length = int.from_bytes(msg_length_bytes, byteorder='big')
+            msg_length = int.from_bytes(msg_length_bytes, byteorder="big")
             encrypted_info = self.receive_exact(sock, msg_length)
             info = self.decrypt_message(encrypted_info, session_aes_key)
             peer_connection_type, peer_listening_port = info.split(',')
             peer_listening_port = int(peer_listening_port)
+            print(f"Received peer's connection type: {peer_connection_type}, port: {peer_listening_port}")
 
-            # Determine if the peer is a group or a peer
-            is_group = (peer_connection_type == 'group')
+            # Step 8: Determine if the peer is a group or an individual
+            is_group = (peer_connection_type == "group")
 
-            # Create a ConnectionEntity to represent the connection
-            entity = ConnectionEntity.ConnectionEntity(peer_ip, peer_port, sock, peer_public_key, session_aes_key, is_group)
-            self.peers[(peer_ip, peer_port)] = entity  # Use tuple as key
-            self.peers_historic[(peer_ip, peer_port)] = entity
-            # Start a thread to receive messages from the peer
+            # Step 9: Create a `ConnectionEntity` to represent the connection
+            entity = ConnectionEntity.ConnectionEntity(peer_ip, peer_listening_port, sock, None, session_aes_key, is_group)
+            self.peers[(peer_ip, peer_listening_port)] = entity
+            self.peers_historic[(peer_ip, peer_listening_port)] = entity
+
+            # Step 10: Start a thread to handle receiving messages from the peer
             threading.Thread(target=self.receive_messages, args=(entity,), daemon=True).start()
-            print(f"Connected to {peer_ip}:{peer_port} as {'Group' if is_group else 'Peer'}")
+            print(f"Connected to {peer_ip}:{peer_listening_port} as {'Group' if is_group else 'Peer'}")
 
         except Exception as e:
             print(f"Could not connect to {peer_ip}:{peer_port}\nError: {e}")
-            # Remove the peer from peers list if connection fails
+            # Remove the peer from the peers list if connection fails
             if (peer_ip, peer_port) in self.peers:
                 del self.peers[(peer_ip, peer_port)]
             raise
+
 
     def validate_ip(self, ip):
         """
@@ -1233,7 +1343,7 @@ class P2PChatApp:
         except Exception as e:
             print(f"Failed to update user topics in S3: {e}")
 
-    def load_messages_from_cloud(self, entity):
+    def load_messages_from_cloud(self, entity, peer_ip=None, peer_port=None):
         """
         Loads messages from multiple cloud databases and decrypts them.
         """
@@ -1270,8 +1380,41 @@ class P2PChatApp:
                 except Exception as e:
                     print(f"Error decrypting message: {e}")
                     continue  # Skip to the next message
+                
+        else: 
+            
+            if not peer_ip or not peer_port:
+                return ValueError("Peer IP and port are required to load messages.")
+            
+            local_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
+            remote_id = f"{sanitize_for_firebase_path(peer_ip)}_{peer_port}"
+            
+            chat_id = f"{local_id}_{remote_id}"
+            
+            for replica, s3_bucket_name in zip(self.firebase_refs,self.s3_bucket_names):
+                
+                chat_ref = db.reference(f"{replica}/chats/{chat_id}")
+                messages_data = chat_ref.get() or {} 
+                
+                combined_messages = self.combine_and_deduplicate_messages(messages_data, [])                              
+                    
+                sorted_messages = sorted(combined_messages, key=lambda x: x.get('timestamp', 0))
+                
+                for message_data in sorted_messages:
+                    sender = message_data.get('sender', '')
+                    try:
+                        encrypted_message_bytes = bytes.fromhex(message_data['message'])
+                        message = self.decrypt_message(encrypted_message_bytes, entity.aes_key)
+                        if sender:
+                            display_message = f"{sender}: {message}"
+                        else:
+                            display_message = message
+                        messages.append(display_message)
+                    except Exception as e:
+                        print(f"Error decrypting message: {e}")
+                        continue                  
 
-            return messages
+        return messages
 
     # def load_messages_from_s3(self, path, s3_bucket_name):
     #     """
