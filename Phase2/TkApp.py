@@ -1,8 +1,7 @@
 # TkApp.py
 import json
-import os
 import tkinter as tk
-from tkinter import messagebox, simpledialog
+from tkinter import messagebox
 import threading
 import p2pchat_phase2 as P2PChat
 from p2pchat_phase2 import sanitize_for_firebase_path
@@ -392,15 +391,18 @@ class TkApp:
                     if selected_item.startswith('Group - '):
                         group_name = selected_item[len('Group - '):]
                         selected_entity = self.p2p.peers[group_name]
+                        formatted_ip = None
+                        selected_port = None
                     elif selected_item.startswith('Peer - '):
                         addr = selected_item[len('Peer - '):]
                         selected_ip, selected_port = addr.split(':')
                         selected_port = int(selected_port)
                         selected_entity = self.p2p.peers.get((selected_ip, selected_port))
+                        formatted_ip = selected_ip.replace('.', '_')
                         if not selected_entity:
                             messagebox.showerror("Error", f"Peer {selected_ip}:{selected_port} is not connected.")
                             return
-                    self.open_chat_window(selected_entity)
+                    self.open_chat_window(selected_entity, formatted_ip ,selected_port)
 
             # Button to open chat with the selected entity
             open_chat_button = tk.Button(self.current_frame, text="Open Chat", command=open_chat)
@@ -410,7 +412,7 @@ class TkApp:
         back_button = tk.Button(self.current_frame, text="Back", command=self.setup_main_menu)
         back_button.pack(pady=10)
 
-    def open_chat_window(self, entity):
+    def open_chat_window(self, entity, peer_ip=None, peer_port=None):
         """
         Opens a chat window for communication with the peer or group.
         """
@@ -444,7 +446,7 @@ class TkApp:
         chat_text.config(state=tk.DISABLED)
 
         # Load chat history from the cloud databases
-        self.load_chat_from_cloud(entity, chat_text)
+        self.load_chat_from_cloud(entity, chat_text, peer_ip, peer_port)
 
         # Frame for message entry and buttons
         bottom_frame = tk.Frame(main_frame)
@@ -497,11 +499,11 @@ class TkApp:
                 text_area.config(state=tk.DISABLED)
                 text_area.see(tk.END)
 
-    def load_chat_from_cloud(self, entity, text_area):
+    def load_chat_from_cloud(self, entity, text_area, peer_ip=None, peer_port=None):
         """
         Loads the conversation history from the cloud databases.
         """
-        messages = self.p2p.load_messages_from_cloud(entity)
+        messages = self.p2p.load_messages_from_cloud(entity, peer_ip, peer_port)
         if messages:
             for message in messages:
                 text_area.config(state=tk.NORMAL)
