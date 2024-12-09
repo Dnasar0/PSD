@@ -506,8 +506,8 @@ class TkApp:
 
             recommendations_text.config(state=tk.NORMAL)
             if recommended_ads:
-                for ad in recommended_ads:
-                    recommendations_text.insert(tk.END, f"Ad: {ad['text']}\n\n")
+                for ad_key, ad_content in recommended_ads:
+                    recommendations_text.insert(tk.END, f"Ad: {ad_content['text']}\n\n")
             else:
                 recommendations_text.insert(tk.END, "No advertisements at this time.\n")
             recommendations_text.config(state=tk.DISABLED)
