@@ -58,7 +58,7 @@ class TkApp:
 
     def show_topics_window(self):
         """
-        Displays the topics selection in the same window.
+        Displays the topics selection in the same window, fetching topics from Firebase, S3, or Cosmos DB in case of failure.
         """
         self.clear_frame()
 
@@ -75,32 +75,52 @@ class TkApp:
             cb = tk.Checkbutton(self.current_frame, text=topic, variable=var)
             cb.pack(anchor=tk.W)
 
-        # Attempt to load the user's existing topics from Firebase
+        # Attempt to load the user's existing topics
         user_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
-        
-        for replica in self.p2p.getFirebaseRefs():
-        
-            user_ref = db.reference(f"{replica}/users/{user_id}")
+        selected_topics = []  # Default to empty if no data is found
 
+        # Step 1: Fetch from Firebase
+        firebase_success = False
+        for replica in self.p2p.getFirebaseRefs():
             try:
+                user_ref = db.reference(f"{replica}/users/{user_id}")
                 user_data = user_ref.get()
                 if user_data and 'topics' in user_data:
                     selected_topics = user_data['topics']
-                else:
-                    selected_topics = []
-                    raise Exception("No topics found in Firebase")
+                    firebase_success = True
+                    print(f"Fetched topics for user {user_id} from Firebase: {replica}")
+                    break  # Exit the loop if data is found
             except Exception as e:
-                print(f"Error fetching topics from Firebase: {e}")
-                # If Firebase fails, try fetching from AWS S3
-                
-                for s3_bucket_name in self.p2p.getS3BucketNames():
-                
-                    selected_topics = self.get_topics_from_s3(user_id, s3_bucket_name)
+                print(f"Error fetching topics from Firebase {replica}: {e}")
 
-            # Now update the UI with the selected topics
-            for topic in selected_topics:
-                if topic in self.topic_vars:
-                    self.topic_vars[topic].set(1)
+        # Step 2: If Firebase fails, try S3
+        if not firebase_success:
+            s3_success = False
+            for s3_bucket_name in self.p2p.getS3BucketNames():
+                try:
+                    selected_topics = self.get_topics_from_s3(user_id, s3_bucket_name)
+                    if selected_topics:
+                        s3_success = True
+                        print(f"Fetched topics for user {user_id} from S3 bucket: {s3_bucket_name}")
+                        break  # Exit the loop if data is found
+                except Exception as e:
+                    print(f"Error fetching topics from S3 bucket {s3_bucket_name}: {e}")
+
+            # Step 3: If S3 fails, try Cosmos DB
+            if not s3_success:
+                for cosmos_name in self.p2p.getCosmosNames():
+                    try:
+                        selected_topics = self.get_topics_from_cosmos(user_id, cosmos_name)
+                        if selected_topics:
+                            print(f"Fetched topics for user {user_id} from Cosmos DB: {cosmos_name}")
+                            break  # Exit the loop if data is found
+                    except Exception as e:
+                        print(f"Error fetching topics from Cosmos DB {cosmos_name}: {e}")
+
+        # Update the UI with the selected topics
+        for topic in selected_topics:
+            if topic in self.topic_vars:
+                self.topic_vars[topic].set(1)
 
         # Save button
         save_button = tk.Button(self.current_frame, text="Save", command=self.p2p.save_topics)
@@ -109,6 +129,7 @@ class TkApp:
         # Back button to return to main menu
         back_button = tk.Button(self.current_frame, text="Back", command=self.setup_main_menu)
         back_button.pack(pady=10)
+
 
     def get_topics_from_s3(self, user_id, s3_bucket_name):
         """
@@ -126,6 +147,21 @@ class TkApp:
         except Exception as e:
             print(f"Error fetching topics from S3: {e}")
             messagebox.showerror("Error", "Unable to load topics from both Firebase and S3.")
+            return []
+        
+    def get_topics_from_cosmos(self, user_id, cosmos_name):
+        """
+        Fetches the user's topics from Azure Cosmos DB if Firebase and S3 are unavailable.
+        """
+        try:
+            database = self.p2p.cosmos_client.get_database_client(cosmos_name)
+            container = database.get_container_client("users")
+            user_data = container.read_item(item=user_id)
+            print(f"Fetched topics for user {user_id} from Cosmos DB.")
+            return user_data.get('topics', [])
+        except Exception as e:
+            print(f"Error fetching topics from Cosmos DB: {e}")
+            messagebox.showerror("Error", "Unable to load topics from Firebase, S3, and Cosmos DB.")
             return []
 
 

@@ -9,7 +9,6 @@ import os
 import sys
 import json
 import hashlib
-import random
 import secrets
 import time  # Added import for timestamps
 #from tkinter.ttk import padding
@@ -30,6 +29,9 @@ from firebase_admin import credentials, db
 import boto3
 import sslib.randomness
 import sslib.util
+
+# Cosmos DB
+from azure.cosmos import CosmosClient, exceptions, PartitionKey
 
 from sslib import shamir
 
@@ -60,15 +62,22 @@ def initialize_services():
             aws_secret_access_key='z4TCt1JyLPFeYoLEO/j7ei+550sMmuUdusoxPnSw',
             region_name='us-east-1' #'us-east-1' 
         )  
+        
+    endpoint = "https://projetopsd.documents.azure.com:443/"
+    key = "8623mjb8FhTWVRLmgqeXaq5vLs5qZHuGXX4vSzm3WcXdf9DuHskbEbPpEgxoSY14HlRRMLffbvBeACDbiBWFMQ=="
+    
+    client = CosmosClient(endpoint, key)
 
-    return s3_client
+    return s3_client,client
 
-def create_user_in_both_services(
+def create_user_in_three_services(
     host, 
     port, 
     s3_client, 
+    cosmos_client,
     s3_buckets,  # List of bucket names
     fb_replicas,  # List of Firebase database references
+    cosmos_names, # List of Cosmos DB names
     public_key
 ):
     """
@@ -127,7 +136,32 @@ def create_user_in_both_services(
             print(f"User data uploaded to S3 bucket {bucket_name}: {user_id}")
         except Exception as e:
             print(f"Failed to upload user data to S3 bucket {bucket_name}: {e}")
+                
+    # Store data in all Cosmos DB databases
+    for i, cosmos_name in enumerate(cosmos_names):
+        try:
+            # Get or create the database
+            database = cosmos_client.create_database_if_not_exists(id=cosmos_name)
 
+            # Get or create the container (with "user_id" as the partition key)
+            container = database.create_container_if_not_exists(
+                id='users',
+                partition_key=PartitionKey(path="/id"),  # Use "user_id" as the partition key
+            )
+
+            # Prepare user data
+            user_data = base_user_data.copy()
+            user_data['public_key_share'] = shares['shares'][i][1].hex()  # Convert public key share to hex
+            user_data['id'] = user_id # Partition key requirement
+
+            # Add user data to Cosmos DB
+            container.create_item(body=user_data)
+            print(f"User data added to Cosmos DB {cosmos_name}: {user_id}")
+        except exceptions.CosmosResourceExistsError:
+            print(f"User already exists in Cosmos DB {cosmos_name}: {user_id}")
+        except Exception as e:
+            print(f"Failed to create user in Cosmos DB {cosmos_name}: {e}")
+            
 
 def decode_public_key(encoded_public_key):
     # Decode the Base64 encoded public key
@@ -174,7 +208,8 @@ class P2PChatApp:
         # Storage configuration
         self.s3_bucket_names = ['projetopsd1', 'projetopsd2', 'projetopsd3', 'projetopsd4']
         self.firebase_refs = ['projetopsd1', 'projetopsd2', 'projetopsd3', 'projetopsd4']
-        self.s3_client = initialize_services()
+        self.cosmos_names = ['projetopsd1', 'projetopsd2', 'projetopsd3', 'projetopsd4']
+        self.s3_client, self.cosmos_client = initialize_services()
         
         self.private_key, self.public_key = self.generate_ecdh_key_pair()
 
@@ -203,6 +238,9 @@ class P2PChatApp:
     
     def getS3BucketNames(self):
         return self.s3_bucket_names
+    
+    def getCosmosNames(self):
+        return self.cosmos_names
 
     def user_exists_in_databases(self, user_id):
         """
@@ -232,6 +270,18 @@ class P2PChatApp:
                 print(f"No user data found in S3 bucket {bucket_name}.")
             except Exception as e:
                 print(f"Error checking user in S3 bucket {bucket_name}: {e}")
+                
+        for cosmo_name in self.cosmos_names:
+            try:
+                database = self.cosmos_client.get_database_client(cosmo_name)
+                container = database.get_container_client('users')
+                user_data = container.read_item(item=user_id, partition_key=user_id)
+                print(f"User found in Cosmos DB {cosmo_name}: {user_id}")
+                user_found = True
+            except exceptions.CosmosResourceNotFoundError:
+                print(f"No user data found in Cosmos DB {cosmo_name}.")
+            except Exception as e:
+                print(f"Error checking user in Cosmos DB {cosmo_name}: {e}")
 
         return user_found
 
@@ -250,24 +300,28 @@ class P2PChatApp:
             # If user does not exist or reconstruction fails, regenerate keys
             print("Reconstruction failed. Generating new key pair...")
             self.private_key, self.public_key = self.generate_ecdh_key_pair()
-            create_user_in_both_services(
+            create_user_in_three_services(
                 self.host, 
                 self.port, 
                 self.s3_client, 
+                self.cosmos_client,
                 self.s3_bucket_names, 
                 self.firebase_refs, 
+                self.cosmos_names,
                 self.public_key
             )
             
         else:
             # If user does not exist or reconstruction fails, regenerate keys
             print("User does not exist. Adding to databases...")
-            create_user_in_both_services(
+            create_user_in_three_services(
                 self.host, 
                 self.port, 
                 self.s3_client, 
+                self.cosmos_client,
                 self.s3_bucket_names, 
                 self.firebase_refs, 
+                self.cosmos_names,
                 self.public_key
             )
 
@@ -278,6 +332,31 @@ class P2PChatApp:
         shares = []
         prime = None
         threshold = None
+        
+        # Helper function to attempt reconstruction
+        def try_reconstruct(shares, prime, threshold):
+            if threshold and len(shares) >= threshold:
+                try:
+                    # Decode the shares
+                    shares_list = []
+                    for idx, share in enumerate(shares[:threshold]):  # Only use the required number of shares
+                        share_bytes = base64.b64decode(share)  # Decode base64-encoded share
+                        shares_list.append((idx + 1, share_bytes))  # Use idx + 1 for 1-based indexing
+
+                    # Rebuild the shared_data dictionary for use in Shamir's Secret Sharing
+                    shared_data = {
+                        'shares': shares_list,
+                        'required_shares': threshold,
+                        'prime_mod': int(prime)  # Convert the prime to an integer
+                    }
+
+                    # Attempt to recover the secret
+                    return shamir.recover_secret(shared_data)
+                except Exception as e:
+                    print(f"Failed to reconstruct the public key: {e}")
+            else:
+                print("Insufficient shares to reconstruct the public key.")
+            return None        
 
         # Fetch shares from Firebase replicas
         for replica in self.firebase_refs:
@@ -290,46 +369,6 @@ class P2PChatApp:
                     
             except Exception as e:
                 print(f"Failed to fetch data from Firebase {replica}: {e}")
-
-        # # Fetch shares from S3 buckets
-        # for bucket_name in self.s3_bucket_names:
-        #     try:
-        #         s3_key = f"users/{user_id}.json"
-        #         response = self.s3_client.get_object(Bucket=bucket_name, Key=s3_key)
-        #         user_data = json.loads(response['Body'].read().decode('utf-8'))
-        #         share = user_data['public_key_share']
-        #         if isinstance(share, str):  # Ensure share is base64-encoded string
-        #             shares.append(share)
-        #         prime = prime or int(user_data['prime'])
-        #         threshold = threshold or int(user_data['threshold'])
-        #     except Exception as e:
-        #         print(f"Failed to fetch data from S3 bucket {bucket_name}: {e}")
-
-        # Ensure we have enough shares for reconstruction
-        if len(shares) >= threshold:
-            try:
-
-                # Decode the shares
-                shares_list = []
-                for idx, share in enumerate(shares):
-                    share_bytes = base64.b64decode(share)  # Decode base64 share
-                    shares_list.append((idx, share_bytes))
-
-                # Rebuild the shared_data dictionary for use in Shamir's Secret Sharing
-                shared_data = {
-                    'shares': shares_list,
-                    'required_shares': threshold,
-                    'prime_mod': prime
-                }
-
-                # Attempt to recover the secret
-                return shamir.recover_secret(shared_data)
-            except Exception as e:
-                print(f"Failed to reconstruct the public key: {e}")
-        else:
-            print("Insufficient shares to reconstruct the public key.")
-
-        return None
 
     def get_peers_filename(self):
         """
@@ -1297,10 +1336,11 @@ class P2PChatApp:
                 print("No topics selected, placeholder 'None' added.")
             
             
-        for s3_bucket_name in self.s3_bucket_names:
+        for s3_bucket_name,cosmos_name in zip(self.s3_bucket_names, self.cosmos_names):
             
             # After saving to Firebase, also save to AWS S3
             self.update_user_topics_in_s3(user_id, selected_topics, s3_bucket_name)            
+            self.update_user_topics_in_cosmos(user_id, selected_topics, cosmos_name)
 
         # Verify if the user's groups topics that he is in are the same as the topics that he has,
         # in case he is in a group that has a topic that the user doesn't have then the connection with that group is closed
@@ -1342,6 +1382,34 @@ class P2PChatApp:
             print(f"User topics for '{user_id}' successfully updated in S3.")
         except Exception as e:
             print(f"Failed to update user topics in S3: {e}")
+            
+    def update_user_topics_in_cosmos(self, user_id, selected_topics, cosmos_db_name):
+        """
+        Updates the user's topics in the Cosmos DB database.
+        """
+        try:
+            # Get Cosmos database and container
+            database = self.cosmos_client.get_database_client(cosmos_db_name)
+            container = database.get_container_client("users")
+
+            user_doc = container.read_item(item=user_id, partition_key=user_id)
+            existing_topics = user_doc.get('topics', [])
+
+            if selected_topics:
+                if 'None' in existing_topics:
+                    existing_topics = [topic for topic in existing_topics if topic != 'None']
+                existing_topics.extend(selected_topics)
+                user_doc['topics'] = list(set(existing_topics))  # Deduplicate topics
+            else:
+                # If no topics are selected, set to ['None']
+                user_doc['topics'] = ['None']
+
+            # Update the user document in Cosmos DB
+            container.replace_item(item=user_doc['id'], body=user_doc)
+            print(f"Topics updated in Cosmos DB {cosmos_db_name} for user {user_id}: {user_doc['topics']}")
+            
+        except Exception as e:
+            print(f"Error updating topics in Cosmos DB {cosmos_db_name} for user {user_id}: {e}")
 
     def load_messages_from_cloud(self, entity, peer_ip=None, peer_port=None):
         """
