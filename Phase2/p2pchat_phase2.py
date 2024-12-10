@@ -301,7 +301,7 @@ class P2PChatApp:
         """
         user_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
 
-        if self.user_exists_in_databases(user_id):
+        if not self.user_exists_in_databases(user_id):
 
             if self.reconstruct_public_key(user_id):
                 return
@@ -320,19 +320,19 @@ class P2PChatApp:
                 self.public_key
             )
             
-        else:
-            # If user does not exist or reconstruction fails, regenerate keys
-            print("User does not exist. Adding to databases...")
-            create_user_in_three_services(
-                self.host, 
-                self.port, 
-                self.s3_client, 
-                self.cosmos_client,
-                self.s3_bucket_names, 
-                self.firebase_refs, 
-                self.cosmos_names,
-                self.public_key
-            )
+        #else:
+        #    # If user does not exist or reconstruction fails, regenerate keys
+        #    print("User does not exist. Adding to databases...")
+        #    create_user_in_three_services(
+        #        self.host, 
+        #        self.port, 
+        #        self.s3_client, 
+        #        self.cosmos_client,
+        #        self.s3_bucket_names, 
+        #        self.firebase_refs, 
+        #        self.cosmos_names,
+        #        self.public_key
+        #    )
 
     def reconstruct_public_key(self, user_id):
         """
