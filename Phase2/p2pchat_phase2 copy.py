@@ -30,138 +30,20 @@ import boto3
 import sslib.randomness
 import sslib.util
 
-# Cosmos DB
+import InMemoryORAM as ORAM
+
+# Lightweight pre-trained model
+from sentence_transformers import SentenceTransformer
+model = SentenceTransformer('all-MiniLM-L6-v2')
+from sklearn.metrics.pairwise import cosine_similarity
+
+# Cosmos DB 
 from azure.cosmos import CosmosClient, exceptions, PartitionKey
 
 from sslib import shamir
 
 import ConnectionEntity
 import TkApp
-
-# Initialize Firebase and S3 clients
-def initialize_services():
-
-    # Initialize Firebase Admin SDK with credentials and database URL
-    if not firebase_admin._apps:
-        #cred = credentials.Certificate("psdproject-6e38f-firebase-adminsdk-icq10-3708af2f3d.json")
-        cred = credentials.Certificate("projetopsd-5a681-19d45fdfc118.json")
-        #cred = credentials.Certificate("projetopsd-6abec-firebase-adminsdk-tf6mp-1a2522b1cb.json")
-        firebase_admin.initialize_app(cred, {
-            #'databaseURL': 'https://psdproject-6e38f-default-rtdb.europe-west1.firebasedatabase.app/'
-            'databaseURL': 'https://projetopsd-5a681-default-rtdb.europe-west1.firebasedatabase.app/'
-            #'databaseURL': 'https://projetopsd-6abec-default-rtdb.europe-west1.firebasedatabase.app/'
-        })
-
-        # Initialize AWS S3 client
-        s3_client = boto3.client(
-            's3',
-            # Uncomment and set your AWS credentials if needed
-            #aws_access_key_id='AKIAZI2LGQDRWWJFA5RX',
-            aws_access_key_id='AKIAQR5EPGH6RTK32M56',
-            #aws_secret_access_key='mKUTuWpLUvlG16XfZj11KX50o+KUMHQ2FznhLvnx',
-            aws_secret_access_key='z4TCt1JyLPFeYoLEO/j7ei+550sMmuUdusoxPnSw',
-            region_name='us-east-1' #'us-east-1' 
-        )  
-        
-    endpoint = "https://projetopsd.documents.azure.com:443/"
-    key = "8623mjb8FhTWVRLmgqeXaq5vLs5qZHuGXX4vSzm3WcXdf9DuHskbEbPpEgxoSY14HlRRMLffbvBeACDbiBWFMQ=="
-    
-    client = CosmosClient(endpoint, key)
-
-    return s3_client,client
-
-def create_user_in_three_services(
-    host, 
-    port, 
-    s3_client, 
-    cosmos_client,
-    s3_buckets,  # List of bucket names
-    fb_replicas,  # List of Firebase database references
-    cosmos_names, # List of Cosmos DB names
-    public_key
-):
-    """
-    Creates a user in multiple Firebase replicas and multiple S3 buckets with Shamir's Secret Sharing for the public key.
-    """
-    user_id = f"{sanitize_for_firebase_path(host)}_{port}"
-
-    # Convert public key to a big integer (or byte representation)
-    public_key_pem = public_key.public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo
-    )
-    public_key_bytes = bytes.fromhex(public_key_pem.hex())  # Convert to bytes
-
-    # Shamir's Secret Sharing parameters
-    n = len(s3_buckets)  # Total number of shares
-    t = n // 2 + 1  # Threshold: Minimum shares required to reconstruct
-
-    # Split the public key into shares
-    shares = shamir.split_secret(public_key_bytes, t, n)
-    
-    prime_mod = bytes_to_base64(shares['prime_mod'])
-
-    # User data to store
-    base_user_data = {
-        'topics': ['None'],
-        'prime': prime_mod,
-        'threshold': t
-    }
-
-    # Store data in all Firebase replicas
-    for i, replica in enumerate(fb_replicas):
-        try:
-            user_ref = db.reference(f"{replica}/users/{user_id}")
-            user_data = base_user_data.copy()
-            # Correctly access the public key share from the tuple and convert it to hex
-            user_data['public_key_share'] = shares['shares'][i][1].hex()  # Get the byte array from the tuple and convert it to hex
-            user_ref.set(user_data)
-            print(f"User created in Firebase {replica}: {user_id}")
-        except Exception as e:
-            print(f"Failed to create user in Firebase {replica}: {e}")
-
-    # Store data in all S3 buckets
-    for i, bucket_name in enumerate(s3_buckets):
-        try:
-            user_data = base_user_data.copy()
-            # Correctly access the public key share from the tuple and convert it to hex
-            user_data['public_key_share'] = shares['shares'][i][1].hex()  # Get the byte array from the tuple and convert it to hex
-            s3_key = f"users/{user_id}.json"
-            s3_client.put_object(
-                Bucket=bucket_name,
-                Key=s3_key,
-                Body=json.dumps(user_data),
-                ContentType='application/json'
-            )
-            print(f"User data uploaded to S3 bucket {bucket_name}: {user_id}")
-        except Exception as e:
-            print(f"Failed to upload user data to S3 bucket {bucket_name}: {e}")
-                
-    # Store data in all Cosmos DB databases
-    for i, cosmos_name in enumerate(cosmos_names):
-        try:
-            # Get or create the database
-            database = cosmos_client.create_database_if_not_exists(id=cosmos_name)
-
-            # Get or create the container (with "user_id" as the partition key)
-            container = database.create_container_if_not_exists(
-                id='users',
-                partition_key=PartitionKey(path="/id"),  # Use "user_id" as the partition key
-            )
-
-            # Prepare user data
-            user_data = base_user_data.copy()
-            user_data['public_key_share'] = shares['shares'][i][1].hex()  # Convert public key share to hex
-            user_data['id'] = user_id # Partition key requirement
-
-            # Add user data to Cosmos DB
-            container.create_item(body=user_data)
-            print(f"User data added to Cosmos DB {cosmos_name}: {user_id}")
-        except exceptions.CosmosResourceExistsError:
-            print(f"User already exists in Cosmos DB {cosmos_name}: {user_id}")
-        except Exception as e:
-            print(f"Failed to create user in Cosmos DB {cosmos_name}: {e}")
-            
 
 def decode_public_key(encoded_public_key):
     # Decode the Base64 encoded public key
@@ -209,7 +91,7 @@ class P2PChatApp:
         self.s3_bucket_names = ['projetopsd1', 'projetopsd2', 'projetopsd3', 'projetopsd4']
         self.firebase_refs = ['projetopsd1', 'projetopsd2', 'projetopsd3', 'projetopsd4']
         self.cosmos_names = ['projetopsd1', 'projetopsd2', 'projetopsd3', 'projetopsd4']
-        self.s3_client, self.cosmos_client = initialize_services()
+        self.s3_client, self.cosmos_client = self.initialize_services()
         
         self.private_key, self.public_key = self.generate_ecdh_key_pair()
 
@@ -241,6 +123,133 @@ class P2PChatApp:
     
     def getCosmosNames(self):
         return self.cosmos_names
+    
+    # Initialize Firebase and S3 clients
+    def initialize_services(self):
+
+        # Initialize Firebase Admin SDK with credentials and database URL
+        if not firebase_admin._apps:
+            #cred = credentials.Certificate("psdproject-6e38f-firebase-adminsdk-icq10-3708af2f3d.json")
+            cred = credentials.Certificate("projetopsd-5a681-19d45fdfc118.json")
+            #cred = credentials.Certificate("projetopsd-6abec-firebase-adminsdk-tf6mp-1a2522b1cb.json")
+            firebase_admin.initialize_app(cred, {
+                #'databaseURL': 'https://psdproject-6e38f-default-rtdb.europe-west1.firebasedatabase.app/'
+                'databaseURL': 'https://projetopsd-5a681-default-rtdb.europe-west1.firebasedatabase.app/'
+                #'databaseURL': 'https://projetopsd-6abec-default-rtdb.europe-west1.firebasedatabase.app/'
+            })
+
+            # Initialize AWS S3 client
+            s3_client = boto3.client(
+                's3',
+                # Uncomment and set your AWS credentials if needed
+                #aws_access_key_id='AKIAZI2LGQDRWWJFA5RX',
+                aws_access_key_id='AKIAQR5EPGH6RTK32M56',
+                #aws_access_key_id='AKIATG6MGI4GPA4WUFHM',
+                #aws_secret_access_key='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',
+                aws_secret_access_key='z4TCt1JyLPFeYoLEO/j7ei+550sMmuUdusoxPnSw',
+                #aws_secret_access_key='fyQscUkArOELwTDSDQ4Q6Wew+K++l1uDX1Ig3atX',
+                region_name='us-east-1' #'us-east-1' 
+            )  
+            
+        endpoint = "https://projetopsd.documents.azure.com:443/"
+        key = "8623mjb8FhTWVRLmgqeXaq5vLs5qZHuGXX4vSzm3WcXdf9DuHskbEbPpEgxoSY14HlRRMLffbvBeACDbiBWFMQ=="
+        
+        client = CosmosClient(endpoint, key)
+
+        return s3_client,client
+
+    def create_user_in_three_services(
+        self,
+        host, 
+        port, 
+        s3_client, 
+        cosmos_client,
+        s3_buckets,  # List of bucket names
+        fb_replicas,  # List of Firebase database references
+        cosmos_names, # List of Cosmos DB names
+        public_key
+    ):
+        """
+        Creates a user in multiple Firebase replicas and multiple S3 buckets with Shamir's Secret Sharing for the public key.
+        """
+        user_id = f"{sanitize_for_firebase_path(host)}_{port}"
+
+        # Convert public key to a big integer (or byte representation)
+        public_key_pem = public_key.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+        public_key_bytes = bytes.fromhex(public_key_pem.hex())  # Convert to bytes
+
+        # Shamir's Secret Sharing parameters
+        n = len(s3_buckets)  # Total number of shares
+        t = n // 2 + 1  # Threshold: Minimum shares required to reconstruct
+
+        # Split the public key into shares
+        shares = shamir.split_secret(public_key_bytes, t, n)
+        
+        prime_mod = bytes_to_base64(shares['prime_mod'])
+
+        # User data to store
+        base_user_data = {
+            'topics': ['None'],
+            'prime': prime_mod,
+            'threshold': t
+        }
+
+        # Store data in all Firebase replicas
+        for i, replica in enumerate(fb_replicas):
+            try:
+                user_ref = db.reference(f"{replica}/users/{user_id}")
+                user_data = base_user_data.copy()
+                # Correctly access the public key share from the tuple and convert it to hex
+                user_data['public_key_share'] = shares['shares'][i][1].hex()  # Get the byte array from the tuple and convert it to hex
+                user_ref.set(user_data)
+                print(f"User created in Firebase {replica}: {user_id}")
+            except Exception as e:
+                print(f"Failed to create user in Firebase {replica}: {e}")
+
+        # Store data in all S3 buckets
+        for i, bucket_name in enumerate(s3_buckets):
+            try:
+                user_data = base_user_data.copy()
+                # Correctly access the public key share from the tuple and convert it to hex
+                user_data['public_key_share'] = shares['shares'][i][1].hex()  # Get the byte array from the tuple and convert it to hex
+                s3_key = f"users/{user_id}.json"
+                s3_client.put_object(
+                    Bucket=bucket_name,
+                    Key=s3_key,
+                    Body=json.dumps(user_data),
+                    ContentType='application/json'
+                )
+                print(f"User data uploaded to S3 bucket {bucket_name}: {user_id}")
+            except Exception as e:
+                print(f"Failed to upload user data to S3 bucket {bucket_name}: {e}")
+                    
+        # Store data in all Cosmos DB databases
+        for i, cosmos_name in enumerate(cosmos_names):
+            try:
+                # Get or create the database
+                database = cosmos_client.create_database_if_not_exists(id=cosmos_name)
+
+                # Get or create the container (with "user_id" as the partition key)
+                container = database.create_container_if_not_exists(
+                    id='users',
+                    partition_key=PartitionKey(path="/id"),  # Use "user_id" as the partition key
+                )
+
+                # Prepare user data
+                user_data = base_user_data.copy()
+                user_data['public_key_share'] = shares['shares'][i][1].hex()  # Convert public key share to hex
+                user_data['id'] = user_id # Partition key requirement
+
+                # Add user data to Cosmos DB
+                container.create_item(body=user_data)
+                print(f"User data added to Cosmos DB {cosmos_name}: {user_id}")
+            except exceptions.CosmosResourceExistsError:
+                print(f"User already exists in Cosmos DB {cosmos_name}: {user_id}")
+            except Exception as e:
+                print(f"Failed to create user in Cosmos DB {cosmos_name}: {e}")    
 
     def user_exists_in_databases(self, user_id):
         """
@@ -312,53 +321,29 @@ class P2PChatApp:
             )
             
         else:
-            # If user does not exist or reconstruction fails, regenerate keys
-            print("User does not exist. Adding to databases...")
-            create_user_in_three_services(
-                self.host, 
-                self.port, 
-                self.s3_client, 
-                self.cosmos_client,
-                self.s3_bucket_names, 
-                self.firebase_refs, 
-                self.cosmos_names,
-                self.public_key
-            )
+           # If user does not exist or reconstruction fails, regenerate keys
+           print("User does not exist. Adding to databases...")
+           create_user_in_three_services(
+               self.host, 
+               self.port, 
+               self.s3_client, 
+               self.cosmos_client,
+               self.s3_bucket_names, 
+               self.firebase_refs, 
+               self.cosmos_names,
+               self.public_key
+           )
 
     def reconstruct_public_key(self, user_id):
         """
-        Reconstruct the user's public key from available shares.
+        Reconstruct the user's public key from available shares in Firebase, S3, and Cosmos DB sequentially.
         """
         shares = []
         prime = None
         threshold = None
-        
-        # Helper function to attempt reconstruction
-        def try_reconstruct(shares, prime, threshold):
-            if threshold and len(shares) >= threshold:
-                try:
-                    # Decode the shares
-                    shares_list = []
-                    for idx, share in enumerate(shares[:threshold]):  # Only use the required number of shares
-                        share_bytes = base64.b64decode(share)  # Decode base64-encoded share
-                        shares_list.append((idx + 1, share_bytes))  # Use idx + 1 for 1-based indexing
+        recovered_secret = None
 
-                    # Rebuild the shared_data dictionary for use in Shamir's Secret Sharing
-                    shared_data = {
-                        'shares': shares_list,
-                        'required_shares': threshold,
-                        'prime_mod': int(prime)  # Convert the prime to an integer
-                    }
-
-                    # Attempt to recover the secret
-                    return shamir.recover_secret(shared_data)
-                except Exception as e:
-                    print(f"Failed to reconstruct the public key: {e}")
-            else:
-                print("Insufficient shares to reconstruct the public key.")
-            return None        
-
-        # Fetch shares from Firebase replicas
+        # Step 1: Try to fetch shares from Firebase
         for replica in self.firebase_refs:
             try:
                 user_data = db.reference(f"{replica}/users/{user_id}").get()
@@ -366,10 +351,99 @@ class P2PChatApp:
                     shares.append(user_data['public_key_share'])
                     prime = base64.b64encode(user_data['prime'].encode('utf-8'))
                     threshold = user_data['threshold']
-                    
+                    print(f"Fetched share from Firebase {replica}.")
             except Exception as e:
                 print(f"Failed to fetch data from Firebase {replica}: {e}")
 
+        if shares and prime and threshold:
+        
+            # Attempt reconstruction with Firebase data
+            recovered_secret = self.can_reconstruct_secret(shares, threshold, prime)
+            if recovered_secret is not None:
+                print("Public key successfully reconstructed from Firebase.")
+                return recovered_secret
+
+        # Step 2: Try to fetch shares from S3
+        shares = []  # Reset shares for the next attempt
+        for bucket_name in self.s3_bucket_names:
+            try:
+                s3_key = f"users/{user_id}.json"
+                response = self.s3_client.get_object(Bucket=bucket_name, Key=s3_key)
+                user_data = json.loads(response['Body'].read().decode('utf-8'))
+                shares.append(user_data['public_key_share'])
+                prime = base64.b64encode(user_data['prime'].encode('utf-8'))
+                threshold = user_data['threshold']
+                print(f"Fetched share from S3 bucket {bucket_name}.")
+            except self.s3_client.exceptions.NoSuchKey:
+                print(f"No data found for user {user_id} in S3 bucket {bucket_name}.")
+            except Exception as e:
+                print(f"Failed to fetch data from S3 bucket {bucket_name}: {e}")
+                
+        if shares and prime and threshold:                    
+
+            # Attempt reconstruction with S3 data
+            recovered_secret = self.can_reconstruct_secret(shares, threshold, prime)
+            if recovered_secret is not None:
+                print("Public key successfully reconstructed from S3.")
+                return recovered_secret
+
+        # Step 3: Try to fetch shares from Cosmos DB
+        shares = []  # Reset shares for the next attempt
+        for cosmos_name in self.cosmos_names:
+            try:
+                database = self.cosmos_client.get_database_client(cosmos_name)
+                container = database.get_container_client("users")
+                user_data = container.read_item(user_id, partition_key=user_id)
+                if user_data:
+                    shares.append(user_data['public_key_share'])
+                    prime = base64.b64encode(user_data['prime'].encode('utf-8'))
+                    threshold = user_data['threshold']
+                    print(f"Fetched share from Cosmos DB {cosmos_name}.")
+            except exceptions.CosmosResourceNotFoundError:
+                print(f"No data found for user {user_id} in Cosmos DB {cosmos_name}.")
+            except Exception as e:
+                print(f"Failed to fetch data from Cosmos DB {cosmos_name}: {e}")
+                
+        if shares and prime and threshold:                
+
+            # Attempt reconstruction with Cosmos DB data
+            recovered_secret = self.can_reconstruct_secret(shares, threshold, prime)
+            if recovered_secret is not None:
+                print("Public key successfully reconstructed from Cosmos DB.")
+                return recovered_secret
+
+        # If all attempts fail
+        print("Failed to reconstruct the public key from all sources.")
+        return None
+
+    def can_reconstruct_secret(self, shares, threshold, prime_mod):
+        """
+        Attempts to reconstruct the secret using Shamir's Secret Sharing.
+        """
+        if len(shares) >= threshold:
+            try:
+                # Decode the shares
+                shares_list = []
+                for idx, share in enumerate(shares):
+                    share_bytes = base64.b64decode(share)  # Decode base64 share
+                    shares_list.append((idx, share_bytes))
+
+                # Rebuild the shared_data dictionary for use in Shamir's Secret Sharing
+                shared_data = {
+                    'shares': shares_list,
+                    'required_shares': threshold,
+                    'prime_mod': prime_mod
+                }
+
+                # Attempt to recover the secret
+                return shamir.recover_secret(shared_data)
+            except Exception as e:
+                print(f"Failed to reconstruct the public key: {e}")
+        else:
+            print("Insufficient shares to reconstruct the public key.")
+
+        return None     
+        
     def get_peers_filename(self):
         """
         Generates a unique filename for storing peers based on host and port, inside the peersList folder.
@@ -1147,7 +1221,7 @@ class P2PChatApp:
         data = {'sender': sender, 'message': message, 'timestamp': timestamp, 'message_id': message_id}
 
             
-        for replica, s3_bucket_name in zip(self.firebase_refs, self.s3_bucket_names):
+        for replica, s3_bucket_name, cosmos_name in zip(self.firebase_refs, self.s3_bucket_names, self.cosmos_names):
         
             if entity.is_group:
             
@@ -1164,6 +1238,7 @@ class P2PChatApp:
                 chat_ref.child(message_id).set(data)
                 # Save to AWS S3
                 self.save_to_aws_s3(f"chats/{chat_id}/{message_id}.json", data, s3_bucket_name)
+                self.save_to_cosmos(chat_id, data, cosmos_name)
 
     def save_to_aws_s3(self, path, data, s3_bucket_name):
         """
@@ -1178,6 +1253,30 @@ class P2PChatApp:
             Key=key,
             Body=json_data
         )
+        
+    def save_to_cosmos(self, chat_id, data, cosmos_name):
+        """
+        Saves chat messages to a Cosmos DB container dynamically created for each chat.
+        """
+        try:
+            # Get or create the database
+            database = self.cosmos_client.create_database_if_not_exists(id=cosmos_name)
+
+            # Dynamically create a container for the chat
+            container_name = f"chat_{chat_id}"  # Name the container based on the chat_id
+            container = database.create_container_if_not_exists(
+                id=container_name,
+                partition_key=PartitionKey(path="/id"),  # Use message_id as the partition key
+            )
+            
+            data['id'] = data['message_id']
+
+            # Insert the message data into the container
+            container.create_item(body=data)
+            print(f"Message saved to Cosmos DB container {container_name}.")
+        except Exception as e:
+            print(f"Error saving message to Cosmos DB: {e}")
+
 
     def encrypt_message(self, message, aes_key):
         """
@@ -1393,16 +1492,7 @@ class P2PChatApp:
             container = database.get_container_client("users")
 
             user_doc = container.read_item(item=user_id, partition_key=user_id)
-            existing_topics = user_doc.get('topics', [])
-
-            if selected_topics:
-                if 'None' in existing_topics:
-                    existing_topics = [topic for topic in existing_topics if topic != 'None']
-                existing_topics.extend(selected_topics)
-                user_doc['topics'] = list(set(existing_topics))  # Deduplicate topics
-            else:
-                # If no topics are selected, set to ['None']
-                user_doc['topics'] = ['None']
+            user_doc.update({'topics': selected_topics})
 
             # Update the user document in Cosmos DB
             container.replace_item(item=user_doc['id'], body=user_doc)
@@ -1435,6 +1525,8 @@ class P2PChatApp:
                         try:
                             # Decrypt message
                             sender = message_data.get('sender', '')
+                            if sender == f"{self.host}:{self.port}":
+                                sender = "You"
                             message = self.decrypt_group_message(entity, message_data)
                             timestamp = message_data.get('timestamp', 0)  # Default to 0 if timestamp is missing
                             display_message = f"{sender}: {message}" if sender else message
@@ -1446,11 +1538,87 @@ class P2PChatApp:
                             continue  # Skip to the next message
 
         else: 
-            if not peer_ip or not peer_port:
-                return ValueError("Peer IP and port are required to load messages.")
+            #if not peer_ip or not peer_port:
+            #    return ValueError("Peer IP and port are required to load messages.")
             
             local_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
             remote_id = f"{sanitize_for_firebase_path(peer_ip)}_{peer_port}"
+            chat_id = f"{local_id}_{remote_id}"
+            
+            for replica in self.firebase_refs:
+                chat_ref = db.reference(f"{replica}/chats/{chat_id}")
+                messages_data = chat_ref.get() or {}
+
+                if messages_data:
+                    for msg_id, message_data in messages_data.items():
+                        if msg_id in seen_message_ids:
+                            continue  # Skip duplicate message
+                        seen_message_ids.add(msg_id)  # Mark message as seen
+
+                        try:
+                            # Decrypt message
+                            sender = message_data.get('sender', '')
+                            encrypted_message_bytes = bytes.fromhex(message_data['message'])
+                            message = self.decrypt_message(encrypted_message_bytes, entity.aes_key)
+                            timestamp = message_data.get('timestamp', 0)  # Default to 0 if timestamp is missing
+                            display_message = f"{sender}: {message}" if sender else message
+
+                            # Add to message objects with timestamp
+                            message_objects.append({"message": display_message, "timestamp": timestamp})
+                        except Exception as e:
+                            print(f"Error decrypting message: {e}")
+                            continue               
+
+        # Sort messages by timestamp
+        sorted_message_objects = sorted(message_objects, key=lambda x: x['timestamp'])
+
+        # Extract only the message text for display
+        messages = [obj['message'] for obj in sorted_message_objects]
+
+        return messages
+    
+    def load_messages_from_cloud_rec(self, entity):
+        """
+        Loads messages from multiple cloud databases, decrypts them, and sorts them by timestamp.
+        """
+        messages = []
+        seen_message_ids = set()
+        message_objects = []  # Collect message objects with timestamp for sorting
+
+        if entity.is_group:
+            for replica in self.firebase_refs:
+                # Load messages from Firebase
+                group_id = sanitize_for_firebase_path(entity.group_name)
+                group_ref = db.reference(f"{replica}/groups/{group_id}/messages")
+                messages_data = group_ref.get() or {}
+
+                if messages_data:
+                    for msg_id, message_data in messages_data.items():
+                        if msg_id in seen_message_ids:
+                            continue
+                        seen_message_ids.add(msg_id)  # Mark message as seen
+
+                        try:
+                            # Decrypt message
+                            sender = message_data.get('sender', '')
+                            if sender == f"{self.host}:{self.port}":
+                                sender = "You"
+                            message = self.decrypt_group_message(entity, message_data)
+                            timestamp = message_data.get('timestamp', 0)  # Default to 0 if timestamp is missing
+                            display_message = f"{sender}: {message}" if sender else message
+
+                            # Add to message objects with timestamp
+                            message_objects.append({"message": display_message, "timestamp": timestamp})
+                        except Exception as e:
+                            print(f"Error decrypting message: {e}")
+                            continue  # Skip to the next message
+
+        else: 
+            #if not peer_ip or not peer_port:
+            #    return ValueError("Peer IP and port are required to load messages.")
+            
+            local_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
+            remote_id = f"{sanitize_for_firebase_path(entity.ip)}_{entity.port}"
             chat_id = f"{local_id}_{remote_id}"
             
             for replica in self.firebase_refs:
@@ -1528,7 +1696,7 @@ class P2PChatApp:
         # Return list of messages
         return list(messages_dict.values())
 
-    def perform_privacy_preserving_search(self, keywords):
+    #def perform_privacy_preserving_search(self, keywords):
         """
         Searches all connected peers/groups for messages containing any of the provided keywords using ORAM.
         Supports multiple keywords and ensures privacy-preserving access patterns.
@@ -1569,28 +1737,37 @@ class P2PChatApp:
         """
         Loads messages from all connected peers and groups into memory.
         """
-        if self.messages_loaded:
-            return  # Messages are already loaded
 
-        for entity_key, entity in self.peers.items():
+        for entity_key, entity in self.peers_historic.items():
             entity.messages = []
-            if entity.is_group:
-                # Load messages using the unified method
-                messages = self.load_messages_from_cloud(entity)
-                if messages:
-                    for message in messages:
-                        entity.messages.append({'sender': '', 'message': message})
-            else:
-                # Placeholder for peer message loading logic
-                pass
+            messages = self.load_messages_from_cloud_rec(entity)
+            
+            if messages:
+                for message in messages:
+                    if message.startswith("You:"):
+                        host_port = "You"
+                        msg = message.split(":", maxsplit=1)[1].strip()  # Divide apenas no primeiro ':'
+                    else:
+                        # Presume que é um host:port
+                        parts = message.split(":", maxsplit=2)
+                        host_port = ":".join(parts[0:2])  # Junta as duas primeiras partes
+                        msg = parts[2].strip()       # A terceira parte é a mensagem
+                    entity.messages.append({'sender': host_port, 'message': msg})
 
-        self.messages_loaded = True  # Set the flag to indicate messages are loaded
+        #self.messages_loaded = True  # Set the flag to indicate messages are loaded
 
+    def load_ad_embeddings(self):
+        # Load ads from Firebase
+        ads_ref = db.reference(f"ads")
+        ads_data = ads_ref.get()
+        
+        return ads_data
 
     def get_recommendations(self):
         """
         Analyzes the client's own message history to determine recommended topics and groups.
         """
+        
         # Collect all messages sent by the client
         user_id = f"{self.host}:{self.port}"
         messages = []
@@ -1607,44 +1784,134 @@ class P2PChatApp:
                     if sender == user_id or sender == 'You':
                         messages.append(message)
 
-        # Now analyze the messages to extract topics
-        topics_keywords = {
-            'Cars': ['car', 'automobile', 'vehicle', 'drive'],
-            'Music': ['music', 'song', 'album', 'band', 'artist'],
-            'Soccer': ['soccer', 'football', 'goal', 'match', 'player'],
-            'Basketball': ['basketball', 'nba', 'hoops', 'dunk', 'player'],
-            'Cybersecurity': ['cybersecurity', 'hacking', 'security', 'malware', 'encryption'],
-            'AI-Artificial Intelligence': ['ai', 'artificial intelligence', 'machine learning', 'neural network'],
-            'IoT-Internet of Things': ['iot', 'internet of things', 'smart device', 'sensor', 'connectivity']
+        # Step 2: Convert messages to embeddings
+        user_embeddings = self.get_message_embeddings(messages)
+        
+        topic_embeddings = self.generate_topic_embeddings()
+
+        # Step 3: Identify the top two topics based on user embeddings
+        top_two_topics = self.classify_topics(user_embeddings, topic_embeddings)
+        
+        # Step 4: Fetch ads from Firebase and generate mappings
+        ads = self.fetch_ads_from_database()  # Fetch ads from Firebase
+
+        #topic_to_ads_map, ads_embeddings = self.generate_topic_to_ads_map(ads)  # Map ads to topics
+        oram = ORAM.InMemoryORAM(ads)  # Initialize ORAM-like storage
+        
+        # Step 5: Retrieve ads related to the top two topics
+        recommendations = self.fetch_ads_for_topics(
+            oram,
+            [topic for topic, _ in top_two_topics],  # Top two topics identified
+            ads
+        )
+
+        # Step 6: Return the matching ads for the top topics
+        return recommendations
+    
+    def get_message_embeddings(self, messages):
+        """
+        Convert messages into embeddings.
+        """
+        return model.encode(messages)   #Encode all messages to get embeddings
+    
+    def generate_topic_embeddings(self):
+        """
+        Gera embeddings representativos para cada tópico usando descrições.
+        """
+        topic_descriptions = {
+            'Cars': "vehicles, cars, automobiles, driving, race",
+            'Music': "songs, albums, bands, artists, sing, singer",
+            'Soccer': "football, soccer, goals, matches, players, ball",
+            'Basketball': "basketball, NBA, hoops, dunks, players, ball",
+            'Cybersecurity': "cybersecurity, hacking, security, malware, encryption",
+            'AI-Artificial Intelligence': "artificial intelligence, machine learning, neural networks",
+            'IoT-Internet of Things': "internet of Things, smart devices, sensors, connectivity"
         }
+        
+        topic_embeddings = {}
+        for topic, description in topic_descriptions.items():
+            topic_embeddings[topic] = model.encode(description)  # Gerar embeddings para cada tópico
+        
+        return topic_embeddings
+    
+    def classify_topics(self, user_embeddings, topic_embeddings):
+        """
+        Classifies the top two topics based on user embeddings.
+        We use keyword matching here as a basic approach.
+        """
+        topic_scores = {topic: 0 for topic in topic_embeddings}
 
-        topics_count = {}
+        for user_emb in user_embeddings:
+            for topic, topic_emb in topic_embeddings.items():
+                # Calcular a similaridade de cosseno
+                similarity = cosine_similarity(
+                    user_emb.reshape(1, -1), topic_emb.reshape(1, -1)
+                )[0][0]
+                topic_scores[topic] += similarity
 
-        for message in messages:
-            message_lower = message.lower()
-            for topic, keywords in topics_keywords.items():
-                for keyword in keywords:
-                    if keyword in message_lower:
-                        topics_count[topic] = topics_count.get(topic, 0) + 1
+        # Ordenar os tópicos com base na soma das similaridades
+        top_two_topics = sorted(topic_scores.items(), key=lambda item: item[1], reverse=True)[:2]
+        return top_two_topics
 
-        # Now get the topics sorted by count
-        recommended_topics = sorted(topics_count.items(), key=lambda item: item[1], reverse=True)
+    def fetch_ads_from_database(self):
+        """
+        Fetch ads from Firebase. Each ad includes a topic and text.
+        """
+        # Reference the 'ads' path in Firebase
+        ads_ref = db.reference("ads")
+        
+        # Retrieve all ads as a list
+        ads_data = ads_ref.get()
 
-        # Now get the groups related to these topics
-        groups_ref = db.reference("groups")
-        groups_data = groups_ref.get()
-        recommended_groups = []
+        if not ads_data:
+            print("No ads found in the database.")
+            return []
 
-        if groups_data:
-            for group_name, group_info in groups_data.items():
-                group_topic = group_info.get('topic')
-                for topic, _ in recommended_topics:
-                    if group_topic == topic:
-                        recommended_groups.append((group_name, group_topic))
-                        break
+        # Process ads into a list of dictionaries with 'topic' and 'embedding'
+        #ads = []
+        #for ad_id, ad_content in ads_data.items():
+        #    # Convert the ad's text into an embedding
+        #    embedding = model.encode(ad_content["text"])  # Use SentenceTransformer to generate embeddings
+        #    ads.append({"topic": ad_content["topic"], "embedding": embedding})
+        return ads_data
+    
+    def generate_topic_to_ads_map(self, ads):
+        """
+        Generate a topic-to-ads mapping dynamically based on ads retrieved from the database.
+        """
+        topic_to_ads_map = {}
+        ads_embeddings = []
 
-        # Return the recommended topics and groups
-        return recommended_topics, recommended_groups
+        for idx, ad in enumerate(ads):
+            topic = ad['topic']
+            embedding = ad['embedding']
+
+            # Add embedding to the ORAM storage
+            ads_embeddings.append(embedding)
+
+            # Update the mapping
+            if topic not in topic_to_ads_map:
+                topic_to_ads_map[idx] = []
+            topic_to_ads_map[idx].append(topic)
+
+        return topic_to_ads_map, ads_embeddings
+    
+    def fetch_ads_for_topics(self, oram, topics, topic_to_ads_map):
+        """
+        Retrieve ads related to the user's top topics.
+        """
+        recommendations = []
+
+        for topic in topics:
+            for idx, (ad_id, ad_content) in enumerate(topic_to_ads_map.items()):
+                if ad_content['topic'] == topic:
+
+                    #indices = topic_to_ads_map[topic]
+                    #for idx in indices:
+                    ad = oram.access(idx)  # Mimic ORAM access
+                    recommendations.append(ad)
+
+        return recommendations
 
 # Main function to start the client-server
 def start_peer():
