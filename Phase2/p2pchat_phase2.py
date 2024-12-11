@@ -37,140 +37,13 @@ from sentence_transformers import SentenceTransformer
 model = SentenceTransformer('all-MiniLM-L6-v2')
 from sklearn.metrics.pairwise import cosine_similarity
 
-# Cosmos DB
+# Cosmos DB 
 from azure.cosmos import CosmosClient, exceptions, PartitionKey
 
 from sslib import shamir
 
 import ConnectionEntity
 import TkApp
-
-# Initialize Firebase and S3 clients
-def initialize_services():
-
-    # Initialize Firebase Admin SDK with credentials and database URL
-    if not firebase_admin._apps:
-        #cred = credentials.Certificate("psdproject-6e38f-firebase-adminsdk-icq10-3708af2f3d.json")
-        #cred = credentials.Certificate("projetopsd-5a681-19d45fdfc118.json")
-        cred = credentials.Certificate("projetopsd-6abec-firebase-adminsdk-tf6mp-1a2522b1cb.json")
-        firebase_admin.initialize_app(cred, {
-            #'databaseURL': 'https://psdproject-6e38f-default-rtdb.europe-west1.firebasedatabase.app/'
-            #'databaseURL': 'https://projetopsd-5a681-default-rtdb.europe-west1.firebasedatabase.app/'
-            'databaseURL': 'https://projetopsd-6abec-default-rtdb.europe-west1.firebasedatabase.app/'
-        })
-
-        # Initialize AWS S3 client
-        s3_client = boto3.client(
-            's3',
-            # Uncomment and set your AWS credentials if needed
-            #aws_access_key_id='AKIAZI2LGQDRWWJFA5RX',
-            aws_access_key_id='AKIAQR5EPGH6RTK32M56',
-            #aws_access_key_id='AKIATG6MGI4GPA4WUFHM',
-            #aws_secret_access_key='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',
-            aws_secret_access_key='z4TCt1JyLPFeYoLEO/j7ei+550sMmuUdusoxPnSw',
-            #aws_secret_access_key='fyQscUkArOELwTDSDQ4Q6Wew+K++l1uDX1Ig3atX',
-            region_name='us-east-1' #'us-east-1' 
-        )  
-        
-    endpoint = "https://projetopsd.documents.azure.com:443/"
-    key = "8623mjb8FhTWVRLmgqeXaq5vLs5qZHuGXX4vSzm3WcXdf9DuHskbEbPpEgxoSY14HlRRMLffbvBeACDbiBWFMQ=="
-    
-    client = CosmosClient(endpoint, key)
-
-    return s3_client,client
-
-def create_user_in_three_services(
-    host, 
-    port, 
-    s3_client, 
-    cosmos_client,
-    s3_buckets,  # List of bucket names
-    fb_replicas,  # List of Firebase database references
-    cosmos_names, # List of Cosmos DB names
-    public_key
-):
-    """
-    Creates a user in multiple Firebase replicas and multiple S3 buckets with Shamir's Secret Sharing for the public key.
-    """
-    user_id = f"{sanitize_for_firebase_path(host)}_{port}"
-
-    # Convert public key to a big integer (or byte representation)
-    public_key_pem = public_key.public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo
-    )
-    public_key_bytes = bytes.fromhex(public_key_pem.hex())  # Convert to bytes
-
-    # Shamir's Secret Sharing parameters
-    n = len(s3_buckets)  # Total number of shares
-    t = n // 2 + 1  # Threshold: Minimum shares required to reconstruct
-
-    # Split the public key into shares
-    shares = shamir.split_secret(public_key_bytes, t, n)
-    
-    prime_mod = bytes_to_base64(shares['prime_mod'])
-
-    # User data to store
-    base_user_data = {
-        'topics': ['None'],
-        'prime': prime_mod,
-        'threshold': t
-    }
-
-    # Store data in all Firebase replicas
-    for i, replica in enumerate(fb_replicas):
-        try:
-            user_ref = db.reference(f"{replica}/users/{user_id}")
-            user_data = base_user_data.copy()
-            # Correctly access the public key share from the tuple and convert it to hex
-            user_data['public_key_share'] = shares['shares'][i][1].hex()  # Get the byte array from the tuple and convert it to hex
-            user_ref.set(user_data)
-            print(f"User created in Firebase {replica}: {user_id}")
-        except Exception as e:
-            print(f"Failed to create user in Firebase {replica}: {e}")
-
-    # Store data in all S3 buckets
-    for i, bucket_name in enumerate(s3_buckets):
-        try:
-            user_data = base_user_data.copy()
-            # Correctly access the public key share from the tuple and convert it to hex
-            user_data['public_key_share'] = shares['shares'][i][1].hex()  # Get the byte array from the tuple and convert it to hex
-            s3_key = f"users/{user_id}.json"
-            s3_client.put_object(
-                Bucket=bucket_name,
-                Key=s3_key,
-                Body=json.dumps(user_data),
-                ContentType='application/json'
-            )
-            print(f"User data uploaded to S3 bucket {bucket_name}: {user_id}")
-        except Exception as e:
-            print(f"Failed to upload user data to S3 bucket {bucket_name}: {e}")
-                
-    # Store data in all Cosmos DB databases
-    for i, cosmos_name in enumerate(cosmos_names):
-        try:
-            # Get or create the database
-            database = cosmos_client.create_database_if_not_exists(id=cosmos_name)
-
-            # Get or create the container (with "user_id" as the partition key)
-            container = database.create_container_if_not_exists(
-                id='users',
-                partition_key=PartitionKey(path="/id"),  # Use "user_id" as the partition key
-            )
-
-            # Prepare user data
-            user_data = base_user_data.copy()
-            user_data['public_key_share'] = shares['shares'][i][1].hex()  # Convert public key share to hex
-            user_data['id'] = user_id # Partition key requirement
-
-            # Add user data to Cosmos DB
-            container.create_item(body=user_data)
-            print(f"User data added to Cosmos DB {cosmos_name}: {user_id}")
-        except exceptions.CosmosResourceExistsError:
-            print(f"User already exists in Cosmos DB {cosmos_name}: {user_id}")
-        except Exception as e:
-            print(f"Failed to create user in Cosmos DB {cosmos_name}: {e}")
-            
 
 def decode_public_key(encoded_public_key):
     # Decode the Base64 encoded public key
@@ -218,7 +91,7 @@ class P2PChatApp:
         self.s3_bucket_names = ['projetopsd1', 'projetopsd2', 'projetopsd3', 'projetopsd4']
         self.firebase_refs = ['projetopsd1', 'projetopsd2', 'projetopsd3', 'projetopsd4']
         self.cosmos_names = ['projetopsd1', 'projetopsd2', 'projetopsd3', 'projetopsd4']
-        self.s3_client, self.cosmos_client = initialize_services()
+        self.s3_client, self.cosmos_client = self.initialize_services()
         
         self.private_key, self.public_key = self.generate_ecdh_key_pair()
 
@@ -250,6 +123,133 @@ class P2PChatApp:
     
     def getCosmosNames(self):
         return self.cosmos_names
+    
+    # Initialize Firebase and S3 clients
+    def initialize_services(self):
+
+        # Initialize Firebase Admin SDK with credentials and database URL
+        if not firebase_admin._apps:
+            #cred = credentials.Certificate("psdproject-6e38f-firebase-adminsdk-icq10-3708af2f3d.json")
+            cred = credentials.Certificate("projetopsd-5a681-19d45fdfc118.json")
+            #cred = credentials.Certificate("projetopsd-6abec-firebase-adminsdk-tf6mp-1a2522b1cb.json")
+            firebase_admin.initialize_app(cred, {
+                #'databaseURL': 'https://psdproject-6e38f-default-rtdb.europe-west1.firebasedatabase.app/'
+                'databaseURL': 'https://projetopsd-5a681-default-rtdb.europe-west1.firebasedatabase.app/'
+                #'databaseURL': 'https://projetopsd-6abec-default-rtdb.europe-west1.firebasedatabase.app/'
+            })
+
+            # Initialize AWS S3 client
+            s3_client = boto3.client(
+                's3',
+                # Uncomment and set your AWS credentials if needed
+                #aws_access_key_id='AKIAZI2LGQDRWWJFA5RX',
+                aws_access_key_id='AKIAQR5EPGH6RTK32M56',
+                #aws_access_key_id='AKIATG6MGI4GPA4WUFHM',
+                #aws_secret_access_key='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',
+                aws_secret_access_key='z4TCt1JyLPFeYoLEO/j7ei+550sMmuUdusoxPnSw',
+                #aws_secret_access_key='fyQscUkArOELwTDSDQ4Q6Wew+K++l1uDX1Ig3atX',
+                region_name='us-east-1' #'us-east-1' 
+            )  
+            
+        endpoint = "https://projetopsd.documents.azure.com:443/"
+        key = "8623mjb8FhTWVRLmgqeXaq5vLs5qZHuGXX4vSzm3WcXdf9DuHskbEbPpEgxoSY14HlRRMLffbvBeACDbiBWFMQ=="
+        
+        client = CosmosClient(endpoint, key)
+
+        return s3_client,client
+
+    def create_user_in_three_services(
+        self,
+        host, 
+        port, 
+        s3_client, 
+        cosmos_client,
+        s3_buckets,  # List of bucket names
+        fb_replicas,  # List of Firebase database references
+        cosmos_names, # List of Cosmos DB names
+        public_key
+    ):
+        """
+        Creates a user in multiple Firebase replicas and multiple S3 buckets with Shamir's Secret Sharing for the public key.
+        """
+        user_id = f"{sanitize_for_firebase_path(host)}_{port}"
+
+        # Convert public key to a big integer (or byte representation)
+        public_key_pem = public_key.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+        public_key_bytes = bytes.fromhex(public_key_pem.hex())  # Convert to bytes
+
+        # Shamir's Secret Sharing parameters
+        n = len(s3_buckets)  # Total number of shares
+        t = n // 2 + 1  # Threshold: Minimum shares required to reconstruct
+
+        # Split the public key into shares
+        shares = shamir.split_secret(public_key_bytes, t, n)
+        
+        prime_mod = bytes_to_base64(shares['prime_mod'])
+
+        # User data to store
+        base_user_data = {
+            'topics': ['None'],
+            'prime': prime_mod,
+            'threshold': t
+        }
+
+        # Store data in all Firebase replicas
+        for i, replica in enumerate(fb_replicas):
+            try:
+                user_ref = db.reference(f"{replica}/users/{user_id}")
+                user_data = base_user_data.copy()
+                # Correctly access the public key share from the tuple and convert it to hex
+                user_data['public_key_share'] = shares['shares'][i][1].hex()  # Get the byte array from the tuple and convert it to hex
+                user_ref.set(user_data)
+                print(f"User created in Firebase {replica}: {user_id}")
+            except Exception as e:
+                print(f"Failed to create user in Firebase {replica}: {e}")
+
+        # Store data in all S3 buckets
+        for i, bucket_name in enumerate(s3_buckets):
+            try:
+                user_data = base_user_data.copy()
+                # Correctly access the public key share from the tuple and convert it to hex
+                user_data['public_key_share'] = shares['shares'][i][1].hex()  # Get the byte array from the tuple and convert it to hex
+                s3_key = f"users/{user_id}.json"
+                s3_client.put_object(
+                    Bucket=bucket_name,
+                    Key=s3_key,
+                    Body=json.dumps(user_data),
+                    ContentType='application/json'
+                )
+                print(f"User data uploaded to S3 bucket {bucket_name}: {user_id}")
+            except Exception as e:
+                print(f"Failed to upload user data to S3 bucket {bucket_name}: {e}")
+                    
+        # Store data in all Cosmos DB databases
+        for i, cosmos_name in enumerate(cosmos_names):
+            try:
+                # Get or create the database
+                database = cosmos_client.create_database_if_not_exists(id=cosmos_name)
+
+                # Get or create the container (with "user_id" as the partition key)
+                container = database.create_container_if_not_exists(
+                    id='users',
+                    partition_key=PartitionKey(path="/id"),  # Use "user_id" as the partition key
+                )
+
+                # Prepare user data
+                user_data = base_user_data.copy()
+                user_data['public_key_share'] = shares['shares'][i][1].hex()  # Convert public key share to hex
+                user_data['id'] = user_id # Partition key requirement
+
+                # Add user data to Cosmos DB
+                container.create_item(body=user_data)
+                print(f"User data added to Cosmos DB {cosmos_name}: {user_id}")
+            except exceptions.CosmosResourceExistsError:
+                print(f"User already exists in Cosmos DB {cosmos_name}: {user_id}")
+            except Exception as e:
+                print(f"Failed to create user in Cosmos DB {cosmos_name}: {e}")    
 
     def user_exists_in_databases(self, user_id):
         """
@@ -301,7 +301,7 @@ class P2PChatApp:
         """
         user_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
 
-        if not self.user_exists_in_databases(user_id):
+        if self.user_exists_in_databases(user_id):
 
             if self.reconstruct_public_key(user_id):
                 return
@@ -320,54 +320,30 @@ class P2PChatApp:
                 self.public_key
             )
             
-        #else:
-        #    # If user does not exist or reconstruction fails, regenerate keys
-        #    print("User does not exist. Adding to databases...")
-        #    create_user_in_three_services(
-        #        self.host, 
-        #        self.port, 
-        #        self.s3_client, 
-        #        self.cosmos_client,
-        #        self.s3_bucket_names, 
-        #        self.firebase_refs, 
-        #        self.cosmos_names,
-        #        self.public_key
-        #    )
+        else:
+           # If user does not exist or reconstruction fails, regenerate keys
+           print("User does not exist. Adding to databases...")
+           create_user_in_three_services(
+               self.host, 
+               self.port, 
+               self.s3_client, 
+               self.cosmos_client,
+               self.s3_bucket_names, 
+               self.firebase_refs, 
+               self.cosmos_names,
+               self.public_key
+           )
 
     def reconstruct_public_key(self, user_id):
         """
-        Reconstruct the user's public key from available shares.
+        Reconstruct the user's public key from available shares in Firebase, S3, and Cosmos DB sequentially.
         """
         shares = []
         prime = None
         threshold = None
-        
-        # Helper function to attempt reconstruction
-        def try_reconstruct(shares, prime, threshold):
-            if threshold and len(shares) >= threshold:
-                try:
-                    # Decode the shares
-                    shares_list = []
-                    for idx, share in enumerate(shares[:threshold]):  # Only use the required number of shares
-                        share_bytes = base64.b64decode(share)  # Decode base64-encoded share
-                        shares_list.append((idx + 1, share_bytes))  # Use idx + 1 for 1-based indexing
+        recovered_secret = None
 
-                    # Rebuild the shared_data dictionary for use in Shamir's Secret Sharing
-                    shared_data = {
-                        'shares': shares_list,
-                        'required_shares': threshold,
-                        'prime_mod': int(prime)  # Convert the prime to an integer
-                    }
-
-                    # Attempt to recover the secret
-                    return shamir.recover_secret(shared_data)
-                except Exception as e:
-                    print(f"Failed to reconstruct the public key: {e}")
-            else:
-                print("Insufficient shares to reconstruct the public key.")
-            return None        
-
-        # Fetch shares from Firebase replicas
+        # Step 1: Try to fetch shares from Firebase
         for replica in self.firebase_refs:
             try:
                 user_data = db.reference(f"{replica}/users/{user_id}").get()
@@ -375,10 +351,99 @@ class P2PChatApp:
                     shares.append(user_data['public_key_share'])
                     prime = base64.b64encode(user_data['prime'].encode('utf-8'))
                     threshold = user_data['threshold']
-                    
+                    print(f"Fetched share from Firebase {replica}.")
             except Exception as e:
                 print(f"Failed to fetch data from Firebase {replica}: {e}")
 
+        if shares and prime and threshold:
+        
+            # Attempt reconstruction with Firebase data
+            recovered_secret = self.can_reconstruct_secret(shares, threshold, prime)
+            if recovered_secret is not None:
+                print("Public key successfully reconstructed from Firebase.")
+                return recovered_secret
+
+        # Step 2: Try to fetch shares from S3
+        shares = []  # Reset shares for the next attempt
+        for bucket_name in self.s3_bucket_names:
+            try:
+                s3_key = f"users/{user_id}.json"
+                response = self.s3_client.get_object(Bucket=bucket_name, Key=s3_key)
+                user_data = json.loads(response['Body'].read().decode('utf-8'))
+                shares.append(user_data['public_key_share'])
+                prime = base64.b64encode(user_data['prime'].encode('utf-8'))
+                threshold = user_data['threshold']
+                print(f"Fetched share from S3 bucket {bucket_name}.")
+            except self.s3_client.exceptions.NoSuchKey:
+                print(f"No data found for user {user_id} in S3 bucket {bucket_name}.")
+            except Exception as e:
+                print(f"Failed to fetch data from S3 bucket {bucket_name}: {e}")
+                
+        if shares and prime and threshold:                    
+
+            # Attempt reconstruction with S3 data
+            recovered_secret = self.can_reconstruct_secret(shares, threshold, prime)
+            if recovered_secret is not None:
+                print("Public key successfully reconstructed from S3.")
+                return recovered_secret
+
+        # Step 3: Try to fetch shares from Cosmos DB
+        shares = []  # Reset shares for the next attempt
+        for cosmos_name in self.cosmos_names:
+            try:
+                database = self.cosmos_client.get_database_client(cosmos_name)
+                container = database.get_container_client("users")
+                user_data = container.read_item(user_id, partition_key=user_id)
+                if user_data:
+                    shares.append(user_data['public_key_share'])
+                    prime = base64.b64encode(user_data['prime'].encode('utf-8'))
+                    threshold = user_data['threshold']
+                    print(f"Fetched share from Cosmos DB {cosmos_name}.")
+            except exceptions.CosmosResourceNotFoundError:
+                print(f"No data found for user {user_id} in Cosmos DB {cosmos_name}.")
+            except Exception as e:
+                print(f"Failed to fetch data from Cosmos DB {cosmos_name}: {e}")
+                
+        if shares and prime and threshold:                
+
+            # Attempt reconstruction with Cosmos DB data
+            recovered_secret = self.can_reconstruct_secret(shares, threshold, prime)
+            if recovered_secret is not None:
+                print("Public key successfully reconstructed from Cosmos DB.")
+                return recovered_secret
+
+        # If all attempts fail
+        print("Failed to reconstruct the public key from all sources.")
+        return None
+
+    def can_reconstruct_secret(self, shares, threshold, prime_mod):
+        """
+        Attempts to reconstruct the secret using Shamir's Secret Sharing.
+        """
+        if len(shares) >= threshold:
+            try:
+                # Decode the shares
+                shares_list = []
+                for idx, share in enumerate(shares):
+                    share_bytes = base64.b64decode(share)  # Decode base64 share
+                    shares_list.append((idx, share_bytes))
+
+                # Rebuild the shared_data dictionary for use in Shamir's Secret Sharing
+                shared_data = {
+                    'shares': shares_list,
+                    'required_shares': threshold,
+                    'prime_mod': prime_mod
+                }
+
+                # Attempt to recover the secret
+                return shamir.recover_secret(shared_data)
+            except Exception as e:
+                print(f"Failed to reconstruct the public key: {e}")
+        else:
+            print("Insufficient shares to reconstruct the public key.")
+
+        return None     
+        
     def get_peers_filename(self):
         """
         Generates a unique filename for storing peers based on host and port, inside the peersList folder.
@@ -1156,7 +1221,7 @@ class P2PChatApp:
         data = {'sender': sender, 'message': message, 'timestamp': timestamp, 'message_id': message_id}
 
             
-        for replica, s3_bucket_name in zip(self.firebase_refs, self.s3_bucket_names):
+        for replica, s3_bucket_name, cosmos_name in zip(self.firebase_refs, self.s3_bucket_names, self.cosmos_names):
         
             if entity.is_group:
             
@@ -1173,6 +1238,7 @@ class P2PChatApp:
                 chat_ref.child(message_id).set(data)
                 # Save to AWS S3
                 self.save_to_aws_s3(f"chats/{chat_id}/{message_id}.json", data, s3_bucket_name)
+                self.save_to_cosmos(chat_id, data, cosmos_name)
 
     def save_to_aws_s3(self, path, data, s3_bucket_name):
         """
@@ -1187,6 +1253,30 @@ class P2PChatApp:
             Key=key,
             Body=json_data
         )
+        
+    def save_to_cosmos(self, chat_id, data, cosmos_name):
+        """
+        Saves chat messages to a Cosmos DB container dynamically created for each chat.
+        """
+        try:
+            # Get or create the database
+            database = self.cosmos_client.create_database_if_not_exists(id=cosmos_name)
+
+            # Dynamically create a container for the chat
+            container_name = f"chat_{chat_id}"  # Name the container based on the chat_id
+            container = database.create_container_if_not_exists(
+                id=container_name,
+                partition_key=PartitionKey(path="/id"),  # Use message_id as the partition key
+            )
+            
+            data['id'] = data['message_id']
+
+            # Insert the message data into the container
+            container.create_item(body=data)
+            print(f"Message saved to Cosmos DB container {container_name}.")
+        except Exception as e:
+            print(f"Error saving message to Cosmos DB: {e}")
+
 
     def encrypt_message(self, message, aes_key):
         """
@@ -1402,16 +1492,7 @@ class P2PChatApp:
             container = database.get_container_client("users")
 
             user_doc = container.read_item(item=user_id, partition_key=user_id)
-            existing_topics = user_doc.get('topics', [])
-
-            if selected_topics:
-                if 'None' in existing_topics:
-                    existing_topics = [topic for topic in existing_topics if topic != 'None']
-                existing_topics.extend(selected_topics)
-                user_doc['topics'] = list(set(existing_topics))  # Deduplicate topics
-            else:
-                # If no topics are selected, set to ['None']
-                user_doc['topics'] = ['None']
+            user_doc.update({'topics': selected_topics})
 
             # Update the user document in Cosmos DB
             container.replace_item(item=user_doc['id'], body=user_doc)
