@@ -309,7 +309,7 @@ class P2PChatApp:
             # If user does not exist or reconstruction fails, regenerate keys
             print("Reconstruction failed. Generating new key pair...")
             self.private_key, self.public_key = self.generate_ecdh_key_pair()
-            create_user_in_three_services(
+            self.create_user_in_three_services(
                 self.host, 
                 self.port, 
                 self.s3_client, 
@@ -319,6 +319,7 @@ class P2PChatApp:
                 self.cosmos_names,
                 self.public_key
             )
+            return
             
         else:
            # If user does not exist or reconstruction fails, regenerate keys

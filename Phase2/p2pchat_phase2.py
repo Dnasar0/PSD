@@ -309,7 +309,7 @@ class P2PChatApp:
             # If user does not exist or reconstruction fails, regenerate keys
             print("Reconstruction failed. Generating new key pair...")
             self.private_key, self.public_key = self.generate_ecdh_key_pair()
-            create_user_in_three_services(
+            self.create_user_in_three_services(
                 self.host, 
                 self.port, 
                 self.s3_client, 
@@ -319,11 +319,12 @@ class P2PChatApp:
                 self.cosmos_names,
                 self.public_key
             )
+            return
             
         else:
            # If user does not exist or reconstruction fails, regenerate keys
            print("User does not exist. Adding to databases...")
-           create_user_in_three_services(
+           self.create_user_in_three_services(
                self.host, 
                self.port, 
                self.s3_client, 
@@ -714,34 +715,7 @@ class P2PChatApp:
         share_bytes = bytes(share)  # Convert the share to bytes
         encrypted_share = public_key.encrypt(share_bytes, _Padding.OAEP(mgf=_Padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256()), label=None)
         return encrypted_share    
-            
-
-    def create_group_in_s3(self, group_name, topic, shares, threshold, prime_mod, s3_bucket_name):
-        """
-        Stores the group data in AWS S3, creating a group if it doesn't exist.
-        """
-        group_data = {
-            'group_name': group_name,
-            'topic': topic,
-            'shares': shares,
-            'threshold': threshold,
-            'prime_mod': prime_mod
-        }
-
-        # Store group data in AWS S3 (group_name as the key)
-        try:
-            s3_key = f"groups/{group_name}.json"
-            self.s3_client.put_object(
-                Bucket=s3_bucket_name,
-                Key=s3_key,
-                Body=json.dumps(group_data),
-                ContentType='application/json'
-            )
-            print(f"Group '{group_name}' created in S3 with topic '{topic}' and distributed shares.")
-        except Exception as e:
-            print(f"Failed to create group in S3: {e}")
-             
-
+           
     def create_new_group(self):
         """
         Allows the user to create a new group with secret sharing attributes.
@@ -814,10 +788,75 @@ class P2PChatApp:
             except Exception as e:
                 print(f"Failed to create group in S3 bucket {s3_bucket_name}: {e}")
                 continue
+            
+        # 5. Store Group in Cosmos DB
+        for cosmos_name in self.cosmos_names:
+            try:
+                self.create_group_in_cosmos(group_name, topic, shares, threshold, prime_mod, cosmos_name)
+            except Exception as e:
+                print(f"Failed to create group in Cosmos DB {cosmos_name}: {e}")
+                continue
 
         # Confirm group creation
         messagebox.showinfo("Group Created", f"Group '{group_name}' has been created.")
+        
+    def create_group_in_s3(self, group_name, topic, shares, threshold, prime_mod, s3_bucket_name):
+        """
+        Stores the group data in AWS S3, creating a group if it doesn't exist.
+        """
+        group_data = {
+            'group_name': group_name,
+            'topic': topic,
+            'shares': shares,
+            'threshold': threshold,
+            'prime_mod': prime_mod
+        }
 
+        # Store group data in AWS S3 (group_name as the key)
+        try:
+            s3_key = f"groups/{group_name}.json"
+            self.s3_client.put_object(
+                Bucket=s3_bucket_name,
+                Key=s3_key,
+                Body=json.dumps(group_data),
+                ContentType='application/json'
+            )
+            print(f"Group '{group_name}' created in S3 with topic '{topic}' and distributed shares.")
+        except Exception as e:
+            print(f"Failed to create group in S3: {e}")
+            
+    def create_group_in_cosmos(self, group_name, topic, shares, threshold, prime_mod, cosmos_name):
+        """
+        Stores the group data in Cosmos DB, creating a dedicated container for the group.
+        """
+        try:
+            # Get or create the database
+            database = self.cosmos_client.create_database_if_not_exists(id=cosmos_name)
+
+            # Dynamically create a container for the group
+            container_name = f"group_{sanitize_for_firebase_path(group_name)}"
+            container = database.create_container_if_not_exists(
+                id=container_name,
+                partition_key=PartitionKey(path="/id"),  # Use "id" as the partition key
+            )
+
+            # Group metadata
+            group_data = {
+                "id": "metadata",  # Identifier for the group's metadata
+                "group_name": group_name,
+                "topic": topic,
+                "shares": shares,
+                "threshold": threshold,
+                "prime_mod": prime_mod,
+                "members": {}  # Initially empty; members can be added later
+            }
+
+            # Store the group's metadata in the container
+            container.create_item(body=group_data)
+            print(f"Group '{group_name}' created in Cosmos DB under container '{container_name}'.")
+
+        except Exception as e:
+            print(f"Failed to create group in Cosmos DB: {e}")
 
     def connect_to_group(self, group_name):
         """
@@ -825,7 +864,7 @@ class P2PChatApp:
         and checks if the user has access to the group based on topics and secret shares.
         """
         
-        for replica,s3_bucket_name in zip(self.firebase_refs, self.s3_bucket_names):
+        for replica,s3_bucket_name, cosmos_name in zip(self.firebase_refs, self.s3_bucket_names, self.cosmos_names):
         
             # Get the user's topics of interest from Firebase
             user_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
@@ -840,7 +879,7 @@ class P2PChatApp:
 
             if not group_data:
                 messagebox.showerror("Error", f"Group '{group_name}' does not exist.")
-                return
+                return 
 
             group_topic = group_data.get('topic')
 
@@ -907,6 +946,25 @@ class P2PChatApp:
 
                 # Optional: Log to confirm the member addition
                 print(f"User {user_id} added to group '{group_name}' with index {len(members)}.")
+            
+                    # Add user to group in Cosmos DB
+            try:
+                # Access the Cosmos DB database and container
+                database = self.cosmos_client.create_database_if_not_exists(id=cosmos_name)
+                container_name = f"group_{sanitize_for_firebase_path(group_name)}"
+                container = database.get_container_client(container_name)
+
+                # Fetch the group metadata
+                group_metadata = container.read_item(item="metadata", partition_key="metadata")
+
+                # Update members in the metadata
+                if user_id not in group_metadata['members']:
+                    group_metadata['members'] = members
+                    container.upsert_item(group_metadata)
+                    print(f"User {user_id} added to Cosmos DB group '{group_name}'.")
+
+            except Exception as e:
+                print(f"Failed to update Cosmos DB for group '{group_name}': {e}")    
 
             # Check if the number of members exceeds the number of shares
             if len(members) > len(shares):
@@ -940,6 +998,16 @@ class P2PChatApp:
                     Key=s3_key,
                     Body=json.dumps(group_data)
                 )            
+                
+                # Update Cosmos DB
+                try:
+                    group_metadata['shares'] = new_shares
+                    group_metadata['prime_mod'] = prime_mod_base64
+                    group_metadata['threshold'] = threshold
+                    container.upsert_item(group_metadata)
+                    print(f"Group '{group_name}' key regenerated and updated in Cosmos DB.")
+                except Exception as e:
+                    print(f"Failed to regenerate key in Cosmos DB for group '{group_name}': {e}")                
 
                 # Log for debugging
                 print(f"Group '{group_name}' key regenerated and redistributed due to new members.")
@@ -1195,7 +1263,6 @@ class P2PChatApp:
                     encrypted_message = self.encrypt_group_message(entity, message)
                     # Convert encrypted message to hex string for JSON serialization
                     encrypted_message_hex = encrypted_message.hex()
-                    print("Grupo")
                     self.save_chat_to_cloud(entity, f"{self.host}:{self.port}", encrypted_message_hex)
                 else:
                     # Update the chat window with the sent message
@@ -1231,6 +1298,7 @@ class P2PChatApp:
                 group_ref.child(message_id).set(data)  # Use message_id as key
                 #Save to AWS S3
                 self.save_to_aws_s3(f"groups/{group_id}/messages/{message_id}.json", data, s3_bucket_name)
+                self.save_to_cosmos(group_id, data, cosmos_name, True)
             else:
                 # Save to Firebase
                 chat_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}_{sanitize_for_firebase_path(entity.ip)}_{entity.port}"
@@ -1238,7 +1306,7 @@ class P2PChatApp:
                 chat_ref.child(message_id).set(data)
                 # Save to AWS S3
                 self.save_to_aws_s3(f"chats/{chat_id}/{message_id}.json", data, s3_bucket_name)
-                self.save_to_cosmos(chat_id, data, cosmos_name)
+                self.save_to_cosmos(chat_id, data, cosmos_name, False)
 
     def save_to_aws_s3(self, path, data, s3_bucket_name):
         """
@@ -1254,7 +1322,7 @@ class P2PChatApp:
             Body=json_data
         )
         
-    def save_to_cosmos(self, chat_id, data, cosmos_name):
+    def save_to_cosmos(self, chat_id, data, cosmos_name, is_group):
         """
         Saves chat messages to a Cosmos DB container dynamically created for each chat.
         """
@@ -1262,8 +1330,11 @@ class P2PChatApp:
             # Get or create the database
             database = self.cosmos_client.create_database_if_not_exists(id=cosmos_name)
 
-            # Dynamically create a container for the chat
-            container_name = f"chat_{chat_id}"  # Name the container based on the chat_id
+            # Dynamically create a container for the chat or group
+            if is_group: 
+                container_name = f"group_{chat_id}"  # Name the container based on the chat_id
+            else:
+                container_name = f"chat_{chat_id}"
             container = database.create_container_if_not_exists(
                 id=container_name,
                 partition_key=PartitionKey(path="/id"),  # Use message_id as the partition key
