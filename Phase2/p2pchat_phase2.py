@@ -94,14 +94,15 @@ class P2PChatApp:
         self.s3_client, self.cosmos_client = self.initialize_services()
         
         self.private_key, self.public_key = self.generate_ecdh_key_pair()
-
-        self.initialize_user()
-
+        
         # Serialize the public key to bytes for transmission
         self.public_key_bytes = self.public_key.public_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo
-        )
+        )        
+
+        self.initialize_user()
+
 
         # Initialize the TkApp class with the existing root instance
         self.gui_app = TkApp.TkApp(self, host, port)
