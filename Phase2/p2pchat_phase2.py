@@ -1331,22 +1331,21 @@ class P2PChatApp:
             database = self.cosmos_client.create_database_if_not_exists(id=cosmos_name)
 
             # Dynamically create a container for the chat or group
-            if is_group: 
-                container_name = f"group_{chat_id}"  # Name the container based on the chat_id
-            else:
-                container_name = f"chat_{chat_id}"
+            container_name = f"group_{chat_id}" if is_group else f"chat_{chat_id}"
+            
             container = database.create_container_if_not_exists(
                 id=container_name,
                 partition_key=PartitionKey(path="/id"),  # Use message_id as the partition key
             )
             
-            data['id'] = data['message_id']
+            # Ensure the data has an "id" field matching the partition key
+            data['id'] = data.get('message_id', f"default-{uuid.uuid4()}")  # Use message_id or fallback
 
-            # Insert the message data into the container
+            # Insert or update the message data in the container
             container.create_item(body=data)
-            print(f"Message saved to Cosmos DB container {container_name}.")
         except Exception as e:
             print(f"Error saving message to Cosmos DB: {e}")
+
 
 
     def encrypt_message(self, message, aes_key):
