@@ -1766,7 +1766,7 @@ class P2PChatApp:
         # Return list of messages
         return list(messages_dict.values())
 
-    #def perform_privacy_preserving_search(self, keywords):
+    def perform_privacy_preserving_search(self, keywords):
         """
         Searches all connected peers/groups for messages containing any of the provided keywords using ORAM.
         Supports multiple keywords and ensures privacy-preserving access patterns.
