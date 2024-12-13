@@ -86,6 +86,8 @@ class P2PChatApp:
         self.server_socket = None
         self.messages_loaded = False
         self.aes_key = None
+        
+        self.topic_embeddings = self.generate_topic_embeddings()
 
         # Storage configuration
         self.s3_bucket_names = ['projetopsd1', 'projetopsd2', 'projetopsd3', 'projetopsd4']
@@ -1275,7 +1277,12 @@ class P2PChatApp:
                     encrypted_message = self.encrypt_group_message(entity, message)
                     # Convert encrypted message to hex string for JSON serialization
                     encrypted_message_hex = encrypted_message.hex()
-                    self.save_chat_to_cloud(entity, f"{self.host}:{self.port}", encrypted_message_hex)
+                    
+                    message_embeddings = self.get_message_embeddings(message)
+                    topic_scores = self.classify_message_to_topic(message_embeddings, self.topic_embeddings)
+                    
+                    print("Grupo")
+                    self.save_chat_to_cloud(entity, f"{self.host}:{self.port}", encrypted_message_hex, topic_scores)
                 else:
                     # Update the chat window with the sent message
                     self.gui_app.update_chat_window(entity, f"You: {message}")
@@ -1285,13 +1292,18 @@ class P2PChatApp:
                     msg_length = len(encrypted_message)
                     entity.connection.sendall(msg_length.to_bytes(4, byteorder='big'))
                     entity.connection.sendall(encrypted_message)
+                    
+                    message_embeddings = self.get_message_embeddings(message)
+                    topic_scores = self.classify_message_to_topic(message_embeddings, self.topic_embeddings)
+                    
                     print("Sent message")
-                    self.save_chat_to_cloud(entity, f"You", encrypted_message_hex)
+                    self.save_chat_to_cloud(entity, f"You", encrypted_message_hex, topic_scores)
+                    print("AFTER")
 
             except Exception as e:
                 messagebox.showerror("Error", f"Could not send message: {e}")
 
-    def save_chat_to_cloud(self, entity, sender, message):
+    def save_chat_to_cloud(self, entity, sender, message, topic_scores=None):
         """
         Saves the conversation to multiple cloud databases.
         """
@@ -1320,6 +1332,19 @@ class P2PChatApp:
                 self.save_to_aws_s3(f"chats/{chat_id}/{message_id}.json", data, s3_bucket_name)
                 self.save_to_cosmos(chat_id, data, cosmos_name, False)
 
+            if not topic_scores == None:
+                local_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
+                topic_scores_ref = db.reference(f"{replica}/users/{local_id}/topic_scores")
+                scores_in_db = topic_scores_ref.get()
+                
+                if isinstance(scores_in_db, list):
+                    for i in range(len(topic_scores)):
+                        scores_in_db[i] += topic_scores[i]
+                    topic_scores_ref.set(scores_in_db)
+                else:
+                    topic_scores_ref.set(topic_scores)                
+                
+                
     def save_to_aws_s3(self, path, data, s3_bucket_name):
         """
         Saves data to AWS S3 in JSON format.
@@ -1860,8 +1885,6 @@ class P2PChatApp:
                             continue  # Skip to the next message
 
         else: 
-            #if not peer_ip or not peer_port:
-            #    return ValueError("Peer IP and port are required to load messages.")
             
             local_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
             remote_id = f"{sanitize_for_firebase_path(entity.ip)}_{entity.port}"
@@ -1990,30 +2013,24 @@ class P2PChatApp:
         """
         Analyzes the client's own message history to determine recommended topics and groups.
         """
+            
+        #Ir buscar topic_scores à base de dados
+        local_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
         
-        # Collect all messages sent by the client
-        user_id = f"{self.host}:{self.port}"
-        messages = []
-
-        # Load messages from all connected entities
-        self.load_all_messages()
-
-        # Go through all cached messages
-        for entity_key, entity in self.peers.items():
-            if entity.messages:
-                for msg in entity.messages:
-                    sender = msg.get('sender', '')
-                    message = msg.get('message', '')
-                    if sender == user_id or sender == 'You':
-                        messages.append(message)
-
-        # Step 2: Convert messages to embeddings
-        user_embeddings = self.get_message_embeddings(messages)
+        #for replica, s3_bucket_name in zip(self.firebase_refs, self.s3_bucket_names):
+        for replica in self.firebase_refs:
+            topic_scores = db.reference(f"{replica}/users/{local_id}/topic_scores").get()
+            break
         
-        topic_embeddings = self.generate_topic_embeddings()
-
-        # Step 3: Identify the top two topics based on user embeddings
-        top_two_topics = self.classify_topics(user_embeddings, topic_embeddings)
+        topics = list(self.topic_embeddings.keys())
+        
+        #Encontrar os dois maiores índices e valores correspondentes
+        sorted_indices = sorted(range(len(topic_scores)), key=lambda i: topic_scores[i], reverse=True)
+        top_indices = sorted_indices[:2]  # Pegar os dois maiores índices
+        
+        #Obter os tópicos correspondentes aos maiores índices
+        top_two_topics = [topics[i] for i in top_indices]
+        print(top_two_topics)
         
         # Step 4: Fetch ads from Firebase and generate mappings
         ads = self.fetch_ads_from_database()  # Fetch ads from Firebase
@@ -2024,18 +2041,18 @@ class P2PChatApp:
         # Step 5: Retrieve ads related to the top two topics
         recommendations = self.fetch_ads_for_topics(
             oram,
-            [topic for topic, _ in top_two_topics],  # Top two topics identified
+            [topic for topic in top_two_topics],  # Top two topics identified
             ads
         )
 
         # Step 6: Return the matching ads for the top topics
         return recommendations
     
-    def get_message_embeddings(self, messages):
+    def get_message_embeddings(self, message):
         """
         Convert messages into embeddings.
         """
-        return model.encode(messages)   #Encode all messages to get embeddings
+        return model.encode(message)   #Encode all messages to get embeddings
     
     def generate_topic_embeddings(self):
         """
@@ -2057,24 +2074,31 @@ class P2PChatApp:
         
         return topic_embeddings
     
-    def classify_topics(self, user_embeddings, topic_embeddings):
+    def classify_message_to_topic(self, user_embedding, topic_embeddings):
         """
         Classifies the top two topics based on user embeddings.
         We use keyword matching here as a basic approach.
-        """
+        """        
         topic_scores = {topic: 0 for topic in topic_embeddings}
 
-        for user_emb in user_embeddings:
-            for topic, topic_emb in topic_embeddings.items():
-                # Calcular a similaridade de cosseno
-                similarity = cosine_similarity(
-                    user_emb.reshape(1, -1), topic_emb.reshape(1, -1)
-                )[0][0]
-                topic_scores[topic] += similarity
+        for topic, topic_emb in topic_embeddings.items():
+            # Calcular a similaridade de cosseno
+            similarity = cosine_similarity(
+                user_embedding.reshape(1, -1), topic_emb.reshape(1, -1)
+            )[0][0]
+            topic_scores[topic] += similarity
+            
+        # Ordenar os itens do dicionário pelos valores em ordem crescente
+        sorted_items = sorted(topic_scores.items(), key=lambda x: x[1])
+        
+        # Criar um dicionário que mapeia o valor original para o ranking
+        rankings = {item[0]: rank for rank, item in enumerate(sorted_items, start=1)}
+        
+        # Mapear os rankings aos valores originais do dicionário
+        topics_values = [rankings[key] for key in topic_scores]
 
         # Ordenar os tópicos com base na soma das similaridades
-        top_two_topics = sorted(topic_scores.items(), key=lambda item: item[1], reverse=True)[:2]
-        return top_two_topics
+        return topics_values
 
     def fetch_ads_from_database(self):
         """
@@ -2090,12 +2114,6 @@ class P2PChatApp:
             print("No ads found in the database.")
             return []
 
-        # Process ads into a list of dictionaries with 'topic' and 'embedding'
-        #ads = []
-        #for ad_id, ad_content in ads_data.items():
-        #    # Convert the ad's text into an embedding
-        #    embedding = model.encode(ad_content["text"])  # Use SentenceTransformer to generate embeddings
-        #    ads.append({"topic": ad_content["topic"], "embedding": embedding})
         return ads_data
     
     def generate_topic_to_ads_map(self, ads):
@@ -2129,8 +2147,6 @@ class P2PChatApp:
             for idx, (ad_id, ad_content) in enumerate(topic_to_ads_map.items()):
                 if ad_content['topic'] == topic:
 
-                    #indices = topic_to_ads_map[topic]
-                    #for idx in indices:
                     ad = oram.access(idx)  # Mimic ORAM access
                     recommendations.append(ad)
 
