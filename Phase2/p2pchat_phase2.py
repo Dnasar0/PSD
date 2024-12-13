@@ -94,16 +94,14 @@ class P2PChatApp:
         self.s3_client, self.cosmos_client = self.initialize_services()
         
         self.private_key, self.public_key = self.generate_ecdh_key_pair()
+
+        self.initialize_user()
         
         # Serialize the public key to bytes for transmission
         self.public_key_bytes = self.public_key.public_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo
-        )        
-
-        self.initialize_user()
-
-
+        )            
         # Initialize the TkApp class with the existing root instance
         self.gui_app = TkApp.TkApp(self, host, port)
 
@@ -325,6 +323,7 @@ class P2PChatApp:
         else:
            # If user does not exist or reconstruction fails, regenerate keys
            print("User does not exist. Adding to databases...")
+           self.private_key, self.public_key = self.generate_ecdh_key_pair()
            self.create_user_in_three_services(
                self.host, 
                self.port, 
@@ -464,24 +463,46 @@ class P2PChatApp:
     def save_peers_to_file(self):
         """
         Saves the list of connected peers and groups to a JSON file inside the peersList folder.
+        Retains connections from previous sessions by merging the existing file data.
         """
-        peers_list = []
-        for key, entity in self.peers_historic.items(): #self.peers.items():
+        # Create a dictionary to store combined peers
+        combined_peers = {}
+
+        # Read existing peers from the file if it exists
+        filename = self.get_peers_filename()
+        if os.path.exists(filename):
+            with open(filename, 'r') as f:
+                try:
+                    existing_peers = json.load(f)
+                    for peer in existing_peers:
+                        if peer['is_group']:
+                            key = f"group:{peer['group_name']}"
+                        else:
+                            key = f"peer:{peer['ip']}:{peer['port']}"
+                        combined_peers[key] = peer
+                except json.JSONDecodeError:
+                    print(f"Warning: Could not parse existing peers file {filename}. Starting fresh.")
+
+        # Merge current session's peers into the combined dictionary
+        for key, entity in self.peers_historic.items():
             if entity.is_group:
-                peers_list.append({
+                key = f"group:{entity.group_name}"
+                combined_peers[key] = {
                     'is_group': True,
                     'group_name': entity.group_name
-                })
+                }
             else:
-                peers_list.append({
+                key = f"peer:{entity.ip}:{entity.port}"
+                combined_peers[key] = {
                     'is_group': False,
                     'ip': entity.ip,
                     'port': entity.port,
-                    'session_key' : entity.aes_key.hex() if entity.aes_key else None
-                })
-        filename = self.get_peers_filename()
+                    'session_key': entity.aes_key.hex() if entity.aes_key else None
+                }
+
+        # Write the merged peers back to the file
         with open(filename, 'w') as f:
-            json.dump(peers_list, f)
+            json.dump(list(combined_peers.values()), f)
 
     def load_peers_from_file(self):
         """
@@ -533,8 +554,7 @@ class P2PChatApp:
             return None
         except Exception as e:
             print(f"Error reading peer list: {e}")
-            return None            
-            
+            return None                    
 
     def generate_ecdh_key_pair(self):
         """
@@ -545,15 +565,6 @@ class P2PChatApp:
         # Derive the corresponding public key
         public_key = private_key.public_key()
         return private_key, public_key
-        
-    def get_public_key(self,user_id):
-        """
-        Retrieves the public key of a user from Firebase.
-        """
-        user_ref = db.reference(f"users/{user_id}")
-        user_data = user_ref.get()
-        public_key = user_data.get('public_key')
-        return public_key
 
     def start_server(self):
         """
@@ -1212,7 +1223,7 @@ class P2PChatApp:
         """
         processed_message_ids = set()  # Keep track of processed messages to avoid duplication
 
-        for replica in self.firebase_refs:
+        for replica,s3_bucket,cosmos_name in zip(self.firebase_refs,self.s3_bucket_names,self.cosmos_names):
             group_id = sanitize_for_firebase_path(group_entity.group_name)
             group_ref = db.reference(f"{replica}/groups/{group_id}/messages")
 
@@ -1313,7 +1324,6 @@ class P2PChatApp:
         """
         Saves data to AWS S3 in JSON format.
         """
-
         key = f"{path}/{secrets.token_hex(16)}.json"
         # Ensure that data is JSON serializable
         json_data = json.dumps(data)
@@ -1346,8 +1356,6 @@ class P2PChatApp:
             container.create_item(body=data)
         except Exception as e:
             print(f"Error saving message to Cosmos DB: {e}")
-
-
 
     def encrypt_message(self, message, aes_key):
         """
@@ -1439,16 +1447,14 @@ class P2PChatApp:
         """
         Retrieves or reconstructs the group key using Shamir's Secret Sharing.
         """
+        
+        found = False
+        
         for replica in self.firebase_refs:
         
             group_id = sanitize_for_firebase_path(group_entity.group_name)
             group_ref = db.reference(f"{replica}/groups/{group_id}")
             group_data = group_ref.get()
-
-            # Check if the group key already exists in Firebase
-            group_key_hex = group_data.get('group_key')
-            if group_key_hex:
-                return group_key_hex  # Return the group key if it's already available
 
             # Reconstruct the key using SSS if shares are present
             if 'shares' in group_data and 'threshold' in group_data and 'prime_mod' in group_data:
@@ -1473,9 +1479,59 @@ class P2PChatApp:
                 # Store the reconstructed key back in Firebase for future use
                 group_key_hex = reconstructed_key.hex()
                 group_ref.update({"group_key": group_key_hex})
+                found = True
                 return group_key_hex
 
             raise ValueError(f"Unable to retrieve or reconstruct the group key for '{group_entity.group_name}'.")
+        
+        if not found:
+            
+            # Do the same for S3
+            for s3_bucket_name in self.s3_bucket_names:
+                try:
+                    s3_key = f"groups/{group_entity.group_name}.json"
+                    response = self.s3_client.get_object(Bucket=s3_bucket_name, Key=s3_key)
+                    group_data = json.loads(response['Body'].read().decode('utf-8'))
+
+                    # Reconstruct the key using SSS if shares are present
+                    if 'shares' in group_data and 'threshold' in group_data and 'prime_mod' in group_data:
+                        shares = group_data['shares']  # [(member_id, share_base64)]
+                        threshold = group_data['threshold']
+                        prime_mod = base64.b64decode(group_data['prime_mod'])
+
+                        # Decode shares from Base64
+                        decoded_shares = [(int(member_id), base64.b64decode(share_base64)) for member_id, share_base64 in shares]
+
+                        # Ensure we have at least the required number of shares
+                        if len(decoded_shares) < threshold:
+                            raise ValueError(f"Not enough shares to reconstruct the key for '{group_entity.group_name}'.")
+
+                        # Use SSS to reconstruct the group key
+                        reconstructed_key = shamir.recover_secret({
+                            "shares": decoded_shares[:threshold],
+                            "prime_mod": prime_mod,
+                            "required_shares": threshold
+                        })
+
+                        # Store the reconstructed key back in S3 for future use
+                        group_key_hex = reconstructed_key.hex()
+                        group_data['group_key'] = group_key_hex
+                        self.s3_client.put_object(
+                            Bucket=s3_bucket_name,
+                            Key=s3_key,
+                            Body=json.dumps(group_data),
+                            ContentType='application/json'
+                        )
+                        found = True
+                        return group_key_hex
+
+                    raise ValueError(f"Unable to retrieve or reconstruct the group key for '{group_entity.group_name}' in S3.")
+                except Exception as e:
+                    print(f"Failed to retrieve or reconstruct group key in S3: {e}")
+                    raise ValueError(f"Unable to retrieve or reconstruct the group key for '{group_entity.group_name}' in S3.")
+            
+            return None
+   
 
     def save_topics(self):
         """
@@ -1523,6 +1579,7 @@ class P2PChatApp:
                     group_topic = group_data.get('topic')
                     if group_topic not in selected_topics:
                         print(f"Closing connection with group '{group}' as it is in topic '{group_topic}' that you don't have anymore.")
+                        self.remove_user_from_group(group)
                         del self.peers[group]
                         del self.peers_historic[group]
 
@@ -1572,6 +1629,73 @@ class P2PChatApp:
         except Exception as e:
             print(f"Error updating topics in Cosmos DB {cosmos_db_name} for user {user_id}: {e}")
 
+    def get_group_data(self, group_name):
+        """
+        Fetches group data from all cloud services.
+        """
+        for replica in self.firebase_refs:
+            group_ref = db.reference(f"{replica}/groups/{sanitize_for_firebase_path(group_name)}")
+            group_data = group_ref.get()
+            if group_data:
+                return group_data
+
+        # Add equivalent methods for AWS S3 and Cosmos DB if necessary
+        # Return None if the group is not found in any service
+        return None
+    
+    def remove_user_from_group(self, group_name):
+        """
+        Removes the user from the group in all cloud services.
+        """
+        user_id = sanitize_for_firebase_path(f"{self.host}:{self.port}")  # Identify the user
+
+        # Remove from Firebase
+        for replica in self.firebase_refs:
+            group_members_ref = db.reference(f"{replica}/groups/{sanitize_for_firebase_path(group_name)}/members/{user_id}")
+            group_members_ref.delete()
+
+        # Update AWS S3
+        for bucket_name in self.s3_bucket_names:
+            try:
+                # Fetch the current group data
+                group_path = f"groups/{group_name}.json"
+                response = self.s3_client.get_object(Bucket=bucket_name, Key=group_path)
+                group_data = json.loads(response['Body'].read().decode('utf-8'))
+
+                # Update the members list
+                if "members" in group_data:
+                    group_data["members"] = [member for member in group_data["members"] if member != user_id]
+
+                # Save the updated group data back to S3
+                self.s3_client.put_object(
+                    Bucket=bucket_name,
+                    Key=group_path,
+                    Body=json.dumps(group_data)
+                )
+                print(f"Updated members for S3 group '{group_name}'.")
+
+            except Exception as e:
+                print(f"Error updating user in S3 group '{group_name}': {e}")
+
+        # Update Cosmos DB
+        for cosmos_name in self.cosmos_names:
+            try:
+                # Fetch the group document
+                container = self.cosmos_client.get_database_client(cosmos_name).get_container_client("groups")
+                group_data = container.read_item(group_name, partition_key=group_name)
+
+                # Update the members list
+                if "members" in group_data:
+                    group_data["members"] = [member for member in group_data["members"] if member != user_id]
+
+                # Replace the updated document in Cosmos DB
+                container.replace_item(group_name, group_data)
+                print(f"Updated members for Cosmos DB group '{group_name}'.")
+
+            except Exception as e:
+                print(f"Error updating user in Cosmos DB group '{group_name}': {e}")
+
+
     def load_messages_from_cloud(self, entity, peer_ip=None, peer_port=None):
         """
         Loads messages from multiple cloud databases, decrypts them, and sorts them by timestamp.
@@ -1607,6 +1731,57 @@ class P2PChatApp:
                         except Exception as e:
                             print(f"Error decrypting message: {e}")
                             continue  # Skip to the next message
+                        
+            for s3_bucket_name in self.s3_bucket_names:
+                # Load messages from AWS S3
+                path = f"groups/{sanitize_for_firebase_path(entity.group_name)}/messages"
+                messages_data = self.load_messages_from_s3(path, s3_bucket_name)
+
+                if messages_data:
+                    for msg_id, message_data in messages_data.items():
+                        if msg_id in seen_message_ids:
+                            continue
+                        seen_message_ids.add(msg_id)
+                        
+                        try: 
+                            # Decrypt message
+                            sender = message_data.get('sender', '')
+                            if sender == f"{self.host}:{self.port}":
+                                sender = "You"
+                            message = self.decrypt_group_message(entity, message_data)
+                            timestamp = message_data.get('timestamp', 0)  # Default to 0 if timestamp is missing
+                            display_message = f"{sender}: {message}" if sender else message
+
+                            # Add to message objects with timestamp
+                            message_objects.append({"message": display_message, "timestamp": timestamp})
+                        except Exception as e:
+                            print(f"Error decrypting message: {e}")
+                            continue  # Skip to the next message
+                        
+            for cosmos_name in self.cosmos_names:
+                # Load messages from Cosmos DB
+                messages_data = self.load_messages_from_cosmos(entity.group_name, cosmos_name)
+
+                if messages_data:
+                    for msg_id, message_data in messages_data.items():
+                        if msg_id in seen_message_ids:
+                            continue
+                        seen_message_ids.add(msg_id)
+                        
+                        try: 
+                            # Decrypt message
+                            sender = message_data.get('sender', '')
+                            if sender == f"{self.host}:{self.port}":
+                                sender = "You"
+                            message = self.decrypt_group_message(entity, message_data)
+                            timestamp = message_data.get('timestamp', 0)  # Default to 0 if timestamp is missing
+                            display_message = f"{sender}: {message}" if sender else message
+
+                            # Add to message objects with timestamp
+                            message_objects.append({"message": display_message, "timestamp": timestamp})
+                        except Exception as e:
+                            print(f"Error decrypting message: {e}")
+                            continue
 
         else: 
             #if not peer_ip or not peer_port:
@@ -1723,29 +1898,6 @@ class P2PChatApp:
         messages = [obj['message'] for obj in sorted_message_objects]
 
         return messages
-
-
-    # def load_messages_from_s3(self, path, s3_bucket_name):
-    #     """
-    #     Loads messages from AWS S3.
-    #     """
-    #     import json
-    #     import os
-    #     messages = {}
-    #     response = self.s3_client.list_objects_v2(Bucket=s3_bucket_name, Prefix=path)
-    #     if 'Contents' in response:
-    #         for obj in response['Contents']:
-    #             obj_key = obj['Key']
-    #             obj_data = self.s3_client.get_object(Bucket=s3_bucket_name, Key=obj_key)
-    #             obj_body = obj_data['Body'].read().decode('utf-8')
-    #             message_data = json.loads(obj_body)
-    #             # Extract message ID from the key or from the message data
-    #             message_id = message_data.get('message_id')
-    #             if not message_id:
-    #                 # Try to extract message_id from the key
-    #                 message_id = os.path.basename(obj_key).replace('.json', '')
-    #             messages[message_id] = message_data
-    #     return messages
 
     def combine_and_deduplicate_messages(self, firebase_messages, s3_messages):
         """
