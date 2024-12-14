@@ -468,46 +468,35 @@ class P2PChatApp:
     def save_peers_to_file(self):
         """
         Saves the list of connected peers and groups to a JSON file inside the peersList folder.
-        Retains connections from previous sessions by merging the existing file data.
+        Removes stale connections from previous sessions.
         """
-        # Create a dictionary to store combined peers
-        combined_peers = {}
+        # Prepare a dictionary to store only current session's peers
+        current_peers = {}
+        print(self.peers_historic.items()) 
 
-        # Read existing peers from the file if it exists
-        filename = self.get_peers_filename()
-        if os.path.exists(filename):
-            with open(filename, 'r') as f:
-                try:
-                    existing_peers = json.load(f)
-                    for peer in existing_peers:
-                        if peer['is_group']:
-                            key = f"group:{peer['group_name']}"
-                        else:
-                            key = f"peer:{peer['ip']}:{peer['port']}"
-                        combined_peers[key] = peer
-                except json.JSONDecodeError:
-                    print(f"Warning: Could not parse existing peers file {filename}. Starting fresh.")
-
-        # Merge current session's peers into the combined dictionary
+        # Populate the current session's peers
         for key, entity in self.peers_historic.items():
             if entity.is_group:
                 key = f"group:{entity.group_name}"
-                combined_peers[key] = {
+                current_peers[key] = {
                     'is_group': True,
                     'group_name': entity.group_name
                 }
             else:
                 key = f"peer:{entity.ip}:{entity.port}"
-                combined_peers[key] = {
+                current_peers[key] = {
                     'is_group': False,
                     'ip': entity.ip,
                     'port': entity.port,
                     'session_key': entity.aes_key.hex() if entity.aes_key else None
                 }
 
-        # Write the merged peers back to the file
+        # Write only current session's peers to the file
+        filename = self.get_peers_filename()
         with open(filename, 'w') as f:
-            json.dump(list(combined_peers.values()), f)
+            json.dump(list(current_peers.values()), f)
+        print(f"Peers saved to file {filename}.")
+
 
     def load_peers_from_file(self):
         """
@@ -1337,8 +1326,8 @@ class P2PChatApp:
         except Exception as e:
             print(f"Could not connect to {peer_ip}:{peer_port}\nError: {e}")
             # Remove the peer from the peers list if connection fails
-            if (peer_ip, peer_port) in self.peers:
-                del self.peers[(peer_ip, peer_port)]
+            # if (peer_ip, peer_port) in self.peers:
+            #     del self.peers[(peer_ip, peer_port)]
             raise
 
 
@@ -2026,7 +2015,7 @@ class P2PChatApp:
             local_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
             remote_id = f"{sanitize_for_firebase_path(entity.ip)}_{entity.port}"
             chat_id = f"{local_id}_{remote_id}"
-            chat_path = f"users/{chat_id}.json"
+            chat_path = f"chats/{chat_id}.json"
             
             for replica in self.firebase_refs:
                 chat_ref = db.reference(f"{replica}/chats/{chat_id}")
@@ -2056,8 +2045,14 @@ class P2PChatApp:
            # AWS S3
             for bucket_name in self.s3_bucket_names:               
             
+                
+                response = self.s3_client.list_objects_v2(Bucket=bucket_name, Prefix=chat_path)
+                
+                if 'Contents' not in response:  # If there are no objects with the given prefix
+                    print(f"No chats found for path '{chat_path}' in bucket '{bucket_name}'. Skipping.")
+                    continue   
                 response = self.s3_client.get_object(Bucket=bucket_name, Key=chat_path)
-                chat_data = json.loads(response['Body'].read().decode('utf-8'))
+                chat_data = json.loads(response['Body'].read().decode('utf-8')) or {}
 
                 if "messages" in chat_data:
                     for message_data in chat_data["messages"]:
@@ -2085,9 +2080,17 @@ class P2PChatApp:
                 try:
                     local_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
                     remote_id = f"{sanitize_for_firebase_path(entity.ip)}_{entity.port}"
-                    chat_id = f"{local_id}_{remote_id}"                     
+                    chat_id = f"{local_id}_{remote_id}"
+                               
+                    container_id = f"chat_{chat_id}"
+                    database_client = self.cosmos_client.get_database_client(cosmos_name)
+                        
+                    if container_id not in [container['id'] for container in database_client.list_containers()]:
+                        print(f"Container '{container_id}' does not exist in Cosmos DB. Skipping.")
+                        continue                    
+                              
                     # Access the Cosmos DB container for the group
-                    container = self.cosmos_client.get_database_client(cosmos_name).get_container_client(f"chat_{chat_id}")
+                    container = database_client.get_container_client(container_id)
 
                     # Query all items in the container
                     query_result = container.query_items(
