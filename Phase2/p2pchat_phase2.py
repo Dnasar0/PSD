@@ -1721,7 +1721,7 @@ class P2PChatApp:
                 print(f"Error updating user in Cosmos DB group '{group_name}': {e}")
 
 
-    def load_messages_from_cloud(self, entity, peer_ip=None, peer_port=None):
+    def load_messages_from_cloud(self, entity):
         """
         Loads messages from multiple cloud databases, decrypts them, and sorts them by timestamp.
         """
@@ -1756,134 +1756,6 @@ class P2PChatApp:
                         except Exception as e:
                             print(f"Error decrypting message: {e}")
                             continue  # Skip to the next message
-                        
-            for s3_bucket_name in self.s3_bucket_names:
-                # Load messages from AWS S3
-                path = f"groups/{sanitize_for_firebase_path(entity.group_name)}/messages"
-                messages_data = self.load_messages_from_s3(path, s3_bucket_name)
-
-                if messages_data:
-                    for msg_id, message_data in messages_data.items():
-                        if msg_id in seen_message_ids:
-                            continue
-                        seen_message_ids.add(msg_id)
-                        
-                        try: 
-                            # Decrypt message
-                            sender = message_data.get('sender', '')
-                            if sender == f"{self.host}:{self.port}":
-                                sender = "You"
-                            message = self.decrypt_group_message(entity, message_data)
-                            timestamp = message_data.get('timestamp', 0)  # Default to 0 if timestamp is missing
-                            display_message = f"{sender}: {message}" if sender else message
-
-                            # Add to message objects with timestamp
-                            message_objects.append({"message": display_message, "timestamp": timestamp})
-                        except Exception as e:
-                            print(f"Error decrypting message: {e}")
-                            continue  # Skip to the next message
-                        
-            for cosmos_name in self.cosmos_names:
-                # Load messages from Cosmos DB
-                messages_data = self.load_messages_from_cosmos(entity.group_name, cosmos_name)
-
-                if messages_data:
-                    for msg_id, message_data in messages_data.items():
-                        if msg_id in seen_message_ids:
-                            continue
-                        seen_message_ids.add(msg_id)
-                        
-                        try: 
-                            # Decrypt message
-                            sender = message_data.get('sender', '')
-                            if sender == f"{self.host}:{self.port}":
-                                sender = "You"
-                            message = self.decrypt_group_message(entity, message_data)
-                            timestamp = message_data.get('timestamp', 0)  # Default to 0 if timestamp is missing
-                            display_message = f"{sender}: {message}" if sender else message
-
-                            # Add to message objects with timestamp
-                            message_objects.append({"message": display_message, "timestamp": timestamp})
-                        except Exception as e:
-                            print(f"Error decrypting message: {e}")
-                            continue
-
-        else: 
-            #if not peer_ip or not peer_port:
-            #    return ValueError("Peer IP and port are required to load messages.")
-            
-            local_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
-            remote_id = f"{sanitize_for_firebase_path(peer_ip)}_{peer_port}"
-            chat_id = f"{local_id}_{remote_id}"
-            
-            for replica in self.firebase_refs:
-                chat_ref = db.reference(f"{replica}/chats/{chat_id}")
-                messages_data = chat_ref.get() or {}
-
-                if messages_data:
-                    for msg_id, message_data in messages_data.items():
-                        if msg_id in seen_message_ids:
-                            continue  # Skip duplicate message
-                        seen_message_ids.add(msg_id)  # Mark message as seen
-
-                        try:
-                            # Decrypt message
-                            sender = message_data.get('sender', '')
-                            encrypted_message_bytes = bytes.fromhex(message_data['message'])
-                            message = self.decrypt_message(encrypted_message_bytes, entity.aes_key)
-                            timestamp = message_data.get('timestamp', 0)  # Default to 0 if timestamp is missing
-                            display_message = f"{sender}: {message}" if sender else message
-
-                            # Add to message objects with timestamp
-                            message_objects.append({"message": display_message, "timestamp": timestamp})
-                        except Exception as e:
-                            print(f"Error decrypting message: {e}")
-                            continue               
-
-        # Sort messages by timestamp
-        sorted_message_objects = sorted(message_objects, key=lambda x: x['timestamp'])
-
-        # Extract only the message text for display
-        messages = [obj['message'] for obj in sorted_message_objects]
-
-        return messages
-    
-    def load_messages_from_cloud_rec(self, entity):
-        """
-        Loads messages from multiple cloud databases, decrypts them, and sorts them by timestamp.
-        """
-        messages = []
-        seen_message_ids = set()
-        message_objects = []  # Collect message objects with timestamp for sorting
-
-        if entity.is_group:
-            for replica in self.firebase_refs:
-                # Load messages from Firebase
-                group_id = sanitize_for_firebase_path(entity.group_name)
-                group_ref = db.reference(f"{replica}/groups/{group_id}/messages")
-                messages_data = group_ref.get() or {}
-
-                if messages_data:
-                    for msg_id, message_data in messages_data.items():
-                        if msg_id in seen_message_ids:
-                            continue
-                        seen_message_ids.add(msg_id)  # Mark message as seen
-
-                        try:
-                            # Decrypt message
-                            sender = message_data.get('sender', '')
-                            if sender == f"{self.host}:{self.port}":
-                                sender = "You"
-                            message = self.decrypt_group_message(entity, message_data)
-                            timestamp = message_data.get('timestamp', 0)  # Default to 0 if timestamp is missing
-                            display_message = f"{sender}: {message}" if sender else message
-
-                            # Add to message objects with timestamp
-                            message_objects.append({"message": display_message, "timestamp": timestamp})
-                        except Exception as e:
-                            print(f"Error decrypting message: {e}")
-                            continue  # Skip to the next message
-
         else: 
             
             local_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
@@ -1986,7 +1858,7 @@ class P2PChatApp:
 
         for entity_key, entity in self.peers_historic.items():
             entity.messages = []
-            messages = self.load_messages_from_cloud_rec(entity)
+            messages = self.load_messages_from_cloud(entity)
             
             if messages:
                 for message in messages:

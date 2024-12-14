@@ -539,7 +539,7 @@ class TkApp:
         """
         Loads the conversation history from the cloud databases.
         """
-        messages = self.p2p.load_messages_from_cloud(entity, peer_ip, peer_port)
+        messages = self.p2p.load_messages_from_cloud(entity)
         if messages:
             for message in messages:
                 text_area.config(state=tk.NORMAL)
