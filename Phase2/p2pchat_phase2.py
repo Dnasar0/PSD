@@ -516,6 +516,15 @@ class P2PChatApp:
                     port = peer_info['port']
                     # Attempt to connect to peer if not already connected
                     if (ip, port) not in self.peers_historic: #self.peers:
+                        entity = ConnectionEntity.ConnectionEntity(
+                            ip,
+                            port,
+                            None,
+                            None,
+                            aes_key=bytes.fromhex(peer_info['session_key']) if peer_info['session_key'] else None,
+                            is_group=False
+                        )
+                        self.peers_historic[(ip, port)] = entity                        
                         threading.Thread(target=self.connect_to_peer, args=(ip, port,True), daemon=True).start()
         else:
             print("No previous peers to load.")
