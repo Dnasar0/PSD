@@ -11,7 +11,6 @@ import json
 import hashlib
 import secrets
 import time  # Added import for timestamps
-#from tkinter.ttk import padding
 import uuid  # Added import for unique message IDs
 
 # Import cryptographic primitives for encryption and key management
@@ -878,33 +877,94 @@ class P2PChatApp:
         and checks if the user has access to the group based on topics and secret shares.
         """
         
-        for replica,s3_bucket_name, cosmos_name in zip(self.firebase_refs, self.s3_bucket_names, self.cosmos_names):
+        # Get the user's topics of interest from Firebase
+        user_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
+        firebase_ok = False
+        s3_ok = False
+        cosmos_ok = False
+            
+        # Step 1: Try connecting through Firebase
+        try:
+            print("Attempting to connect via Firebase...")
+            firebase_ok = self.connect_to_group_firebase(group_name, user_id)
+        except Exception as e:
+            print(f"Firebase connection failed: {e}")
+
+        for s3_bucket_name in self.s3_bucket_names:
+            try:
+                print(f"Attempting to connect via S3 (bucket: {s3_bucket_name})...")
+                s3_ok = self.connect_to_group_s3(group_name, user_id)
+                break
+            except Exception as e:
+                print(f"S3 connection failed for bucket '{s3_bucket_name}': {e}")
+                
+        for cosmos_name in self.cosmos_names:
+            try:
+                print(f"Attempting to connect via Cosmos DB (database: {cosmos_name})...")
+                cosmos_ok = self.connect_to_group_cosmos(group_name, user_id)
+                break
+            except Exception as e:
+                print(f"Cosmos DB connection failed for database '{cosmos_name}': {e}")
+
+        # Final Step: Check if we successfully connected
+        if not firebase_ok and not s3_ok and not cosmos_ok:
+            messagebox.showerror("Error", f"Failed to connect to group '{group_name}' via all services.")
+            return        
         
+        # Proceed to connect to the group
+        if group_name not in self.peers:
+            # Create a ConnectionEntity for the group
+            entity = ConnectionEntity.ConnectionEntity(None, None, None, None, None, is_group=True, group_name=group_name)
+            self.peers[group_name] = entity
+            self.peers_historic[group_name] = entity
+
+            # Start a thread to receive messages from the group
+            threading.Thread(target=self.receive_messages, args=(entity,), daemon=True).start()
+
+            messagebox.showinfo("Connected to Group", f"Connected to group '{group_name}'")
+            self.gui_app.setup_main_menu()
+        else:
+            messagebox.showinfo("Info", f"Already connected to group '{group_name}'")
+            
+    def connect_to_group_firebase(self, group_name, user_id):
+        """
+        Connects to a group in Firebase, checks the user's topics, and updates the group's members.
+        Returns True or False if the user cannot join the group.
+        """
+        
+        ok = False
+        
+        for replica in self.firebase_refs:
             # Get the user's topics of interest from Firebase
-            user_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
             user_ref = db.reference(f"{replica}/users/{user_id}")
             user_data = user_ref.get()
             user_topics = user_data.get('topics', []) if user_data else []
 
-            # Get the group's data (topic, shares, threshold, prime_mod, and members) from Firebase
+            # Get the group's data
             group_id = sanitize_for_firebase_path(group_name)
             group_ref = db.reference(f"{replica}/groups/{group_id}")
             group_data = group_ref.get()
 
             if not group_data:
-                messagebox.showerror("Error", f"Group '{group_name}' does not exist.")
-                return 
+                continue
 
             group_topic = group_data.get('topic')
 
-            # Retrieve members as a dictionary from Firebase
-            members = group_data.get('members', [])  # Get members dictionary or default to emptyt
-
             # Check if the group topic matches the user's topics of interest
             if group_topic not in user_topics:
-                messagebox.showerror("Access Denied", f"You do not have access to the group '{group_name}' as it is not in your topics of interest.")
-                return
+                continue
 
+            # Retrieve members and ensure the user is added
+            members = group_data.get('members', [])
+            if user_id not in members:
+                members.append(user_id)
+                group_data['members'] = members
+
+                # Update the members list in Firebase
+                group_ref.update({'members': members})
+
+                print(f"User {user_id} added to group '{group_name}' in Firebase.")
+                
             # Ensure the group key can be reconstructed or regenerated
             if 'shares' in group_data and 'threshold' in group_data and 'prime_mod' in group_data:
                 shares = group_data['shares']  # This is a list of (counter, share)
@@ -933,52 +993,10 @@ class P2PChatApp:
 
                 if not group_key:
                     messagebox.showerror("Error", f"Failed to reconstruct group key for '{group_name}'.")
-                    return
+                    continue
             else:
                 messagebox.showerror("Error", f"The group '{group_name}' does not have valid shares or a secret.")
-                return
-        
-            # Check if the user is already a member
-            if user_id not in members:
-
-                # Add the user to the members dictionary with the next index
-                members.append(user_id)         
-                
-                group_data['members'] = members
-
-                # Update the members list in Firebase
-                group_ref.update({'members': members})
-                
-                s3_key = f"groups/{group_name}.json"
-                
-                # Update AWS S3
-                self.s3_client.put_object(
-                    Bucket=s3_bucket_name,
-                    Key=s3_key,
-                    Body=json.dumps(group_data)
-                )            
-
-                # Optional: Log to confirm the member addition
-                print(f"User {user_id} added to group '{group_name}' with index {len(members)}.")
-            
-                    # Add user to group in Cosmos DB
-            try:
-                # Access the Cosmos DB database and container
-                database = self.cosmos_client.create_database_if_not_exists(id=cosmos_name)
-                container_name = f"group_{sanitize_for_firebase_path(group_name)}"
-                container = database.get_container_client(container_name)
-
-                # Fetch the group metadata
-                group_metadata = container.read_item(item="metadata", partition_key="metadata")
-
-                # Update members in the metadata
-                if user_id not in group_metadata['members']:
-                    group_metadata['members'] = members
-                    container.upsert_item(group_metadata)
-                    print(f"User {user_id} added to Cosmos DB group '{group_name}'.")
-
-            except Exception as e:
-                print(f"Failed to update Cosmos DB for group '{group_name}': {e}")    
+                continue
 
             # Check if the number of members exceeds the number of shares
             if len(members) > len(shares):
@@ -991,19 +1009,99 @@ class P2PChatApp:
                     (index, base64.b64encode(share).decode('utf-8'))
                     for index, share in shared_data['shares']
                 ]
-                prime_mod_base64 = base64.b64encode(shared_data['prime_mod']).decode('utf-8')
-
-                # Update the group with new shares and prime_mod
+                prime_mod_base64 = base64.b64encode(shared_data['prime_mod']).decode('utf-8')                
+                    
                 group_ref.update({
                     'shares': new_shares,
                     'prime_mod': prime_mod_base64,
                     'threshold': threshold
                 })
-                
-                s3_key = f"groups/{group_name}.json"
-                
-                # Update AWS S3
+            ok = True
+        return ok        
+        
+    def connect_to_group_s3(self, group_name, user_id):
+        """
+        Connects to a group in S3, ensures the user has access, and updates the group members.
+        Returns True or False if the user cannot join the group.
+        """
+        ok = False
+        
+        for s3_bucket_name in self.s3_bucket_names:
+            # Retrieve the group data from S3
+            s3_key = f"groups/{group_name}.json"
+            response = self.s3_client.get_object(Bucket=s3_bucket_name, Key=s3_key)
+            group_data = json.loads(response['Body'].read().decode('utf-8'))
+            
+            if not group_data:
+                continue
+
+            # Check if the user has access to the group's topic
+            group_topic = group_data.get('topic')
+            user_topics = self.get_user_topics_from_s3(user_id, s3_bucket_name)  # Helper function to get user topics
+
+            if group_topic not in user_topics:
+                continue
+
+            # Ensure the user is added to the group's members
+            members = group_data.get('members', [])
+            if user_id not in members:
+                members.append(user_id)
                 group_data['members'] = members
+
+                # Update the group data in S3
+                self.s3_client.put_object(
+                    Bucket=s3_bucket_name,
+                    Key=s3_key,
+                    Body=json.dumps(group_data)
+                )
+                print(f"User {user_id} added to group '{group_name}' in S3.")
+                
+            # Ensure the group key can be reconstructed or regenerated
+            if 'shares' in group_data and 'threshold' in group_data and 'prime_mod' in group_data:
+                shares = group_data['shares']  # This is a list of (counter, share)
+                threshold = group_data['threshold']
+                prime_mod_base64 = group_data['prime_mod']
+
+                # Decode the prime_mod from Base64 back to bytes
+                prime_mod = base64.b64decode(prime_mod_base64)
+
+                # Rebuild the shares list
+                shares_list = []
+                for counter, share_base64 in shares:
+                    # Decode the shares from Base64 back to bytes
+                    share_bytes = base64.b64decode(share_base64)
+                    shares_list.append((counter, share_bytes))
+
+                # Rebuild the shared_data dictionary for use in Shamir's Secret Sharing
+                shared_data = {
+                    'shares': shares_list,
+                    'required_shares': threshold,
+                    'prime_mod': prime_mod
+                }
+
+                # Attempt to recover the group key using the shares and threshold
+                group_key = shamir.recover_secret(shared_data)
+
+                if not group_key:
+                    messagebox.showerror("Error", f"Failed to reconstruct group key for '{group_name}'.")
+                    continue
+            else:
+                messagebox.showerror("Error", f"The group '{group_name}' does not have valid shares or a secret.")
+                continue
+
+            # Check if the number of members exceeds the number of shares
+            if len(members) > len(shares):
+                # Regenerate group key and redistribute shares
+                group_key = os.urandom(32)  # Generate a new 256-bit key
+                shared_data = shamir.split_secret(group_key, threshold, len(members))
+
+                # Encode and store the new shares
+                new_shares = [
+                    (index, base64.b64encode(share).decode('utf-8'))
+                    for index, share in shared_data['shares']
+                ]
+                prime_mod_base64 = base64.b64encode(shared_data['prime_mod']).decode('utf-8')                
+                
                 group_data['shares'] = new_shares
                 group_data['prime_mod'] = prime_mod_base64
                 group_data['threshold'] = threshold
@@ -1011,37 +1109,131 @@ class P2PChatApp:
                     Bucket=s3_bucket_name,
                     Key=s3_key,
                     Body=json.dumps(group_data)
-                )            
+                )                                   
+            ok = True
+
+        return ok
+
+    def get_user_topics_from_s3(self, user_id, s3_bucket_name):
+        """
+        Helper function to retrieve the user's topics of interest from S3.
+        """
+        try:
+            s3_key = f"users/{user_id}.json"
+            response = self.s3_client.get_object(Bucket=s3_bucket_name, Key=s3_key)
+            user_data = json.loads(response['Body'].read().decode('utf-8'))
+            return user_data.get('topics', [])
+        except Exception as e:
+            print(f"Failed to retrieve user topics from S3: {e}")
+            return []
+        
+    def connect_to_group_cosmos(self, group_name, user_id):
+        """
+        Connects to a group in Cosmos DB, ensures the user has access, and updates the group members.
+        Returns True or False if the user cannot join the group.
+        """
+        ok = False
+        
+        for cosmos_name in self.cosmos_names:
+            # Access the Cosmos DB database and container
+            database = self.cosmos_client.create_database_if_not_exists(id=cosmos_name)
+            container_name = f"group_{sanitize_for_firebase_path(group_name)}"
+            container = database.get_container_client(container_name)
+
+            # Fetch the group metadata
+            group_data = container.read_item(item="metadata", partition_key="metadata")
+            
+            if not group_data:
+                continue
+
+            # Check if the user has access to the group's topic
+            group_topic = group_data.get('topic')
+            user_topics = self.get_user_topics_from_cosmos(user_id, cosmos_name)  # Helper function to get user topics
+
+            if group_topic not in user_topics:
+                continue
+
+            # Ensure the user is added to the group's members
+            members = group_data.get('members', [])
+            if user_id not in members:
+                members.append(user_id)
+                group_data['members'] = members
+
+                # Update the group metadata in Cosmos DB
+                container.upsert_item(group_data)
+                print(f"User {user_id} added to Cosmos DB group '{group_name}'.")
                 
-                # Update Cosmos DB
-                try:
-                    group_metadata['shares'] = new_shares
-                    group_metadata['prime_mod'] = prime_mod_base64
-                    group_metadata['threshold'] = threshold
-                    container.upsert_item(group_metadata)
-                    print(f"Group '{group_name}' key regenerated and updated in Cosmos DB.")
-                except Exception as e:
-                    print(f"Failed to regenerate key in Cosmos DB for group '{group_name}': {e}")                
+            # Ensure the group key can be reconstructed or regenerated
+            if 'shares' in group_data and 'threshold' in group_data and 'prime_mod' in group_data:
+                shares = group_data['shares']  # This is a list of (counter, share)
+                threshold = group_data['threshold']
+                prime_mod_base64 = group_data['prime_mod']
 
-                # Log for debugging
-                print(f"Group '{group_name}' key regenerated and redistributed due to new members.")
+                # Decode the prime_mod from Base64 back to bytes
+                prime_mod = base64.b64decode(prime_mod_base64)
 
-        # Proceed to connect to the group
-        if group_name not in self.peers:
-            # Create a ConnectionEntity for the group
-            entity = ConnectionEntity.ConnectionEntity(None, None, None, None, None, is_group=True, group_name=group_name)
-            self.peers[group_name] = entity
-            self.peers_historic[group_name] = entity
+                # Rebuild the shares list
+                shares_list = []
+                for counter, share_base64 in shares:
+                    # Decode the shares from Base64 back to bytes
+                    share_bytes = base64.b64decode(share_base64)
+                    shares_list.append((counter, share_bytes))
 
-            # Start a thread to receive messages from the group
-            threading.Thread(target=self.receive_messages, args=(entity,), daemon=True).start()
+                # Rebuild the shared_data dictionary for use in Shamir's Secret Sharing
+                shared_data = {
+                    'shares': shares_list,
+                    'required_shares': threshold,
+                    'prime_mod': prime_mod
+                }
 
-            messagebox.showinfo("Connected to Group", f"Connected to group '{group_name}'")
-            self.gui_app.setup_main_menu()
-        else:
-            messagebox.showinfo("Info", f"Already connected to group '{group_name}'")
+                # Attempt to recover the group key using the shares and threshold
+                group_key = shamir.recover_secret(shared_data)
 
+                if not group_key:
+                    messagebox.showerror("Error", f"Failed to reconstruct group key for '{group_name}'.")
+                    continue
+            else:
+                messagebox.showerror("Error", f"The group '{group_name}' does not have valid shares or a secret.")
+                continue
 
+            # Check if the number of members exceeds the number of shares
+            if len(members) > len(shares):
+                # Regenerate group key and redistribute shares
+                group_key = os.urandom(32)  # Generate a new 256-bit key
+                shared_data = shamir.split_secret(group_key, threshold, len(members))
+
+                # Encode and store the new shares
+                new_shares = [
+                    (index, base64.b64encode(share).decode('utf-8'))
+                    for index, share in shared_data['shares']
+                ]
+                prime_mod_base64 = base64.b64encode(shared_data['prime_mod']).decode('utf-8')                
+            
+                group_data['shares'] = new_shares
+                group_data['prime_mod'] = prime_mod_base64
+                group_data['threshold'] = threshold
+                container.upsert_item(group_data)
+                print(f"Group '{group_name}' key regenerated and updated in Cosmos DB.")                
+
+            ok = True
+        return ok
+
+    def get_user_topics_from_cosmos(self, user_id, cosmos_name):
+        """
+        Helper function to retrieve the user's topics of interest from Cosmos DB.
+        """
+        try:
+            # Access the Cosmos DB database and container
+            database = self.cosmos_client.create_database_if_not_exists(id=cosmos_name)
+            container = database.get_container_client("users")
+
+            # Retrieve the user's data
+            user_data = container.read_item(item=user_id, partition_key=user_id)
+            return user_data.get('topics', [])
+        except Exception as e:
+            print(f"Failed to retrieve user topics from Cosmos DB: {e}")
+            return []
+            
     def connect_to_peer_ui(self, peer_ip, peer_port):
         """
         Connects to a peer and updates the UI accordingly.
@@ -1730,8 +1922,8 @@ class P2PChatApp:
         message_objects = []  # Collect message objects with timestamp for sorting
 
         if entity.is_group:
+            # Firebase
             for replica in self.firebase_refs:
-                # Load messages from Firebase
                 group_id = sanitize_for_firebase_path(entity.group_name)
                 group_ref = db.reference(f"{replica}/groups/{group_id}/messages")
                 messages_data = group_ref.get() or {}
@@ -1754,8 +1946,84 @@ class P2PChatApp:
                             # Add to message objects with timestamp
                             message_objects.append({"message": display_message, "timestamp": timestamp})
                         except Exception as e:
-                            print(f"Error decrypting message: {e}")
+                            print(f"Error decrypting Firebase message: {e}")
                             continue  # Skip to the next message
+
+            # AWS S3
+            for bucket_name in self.s3_bucket_names:
+                try:
+                    group_path = f"groups/{entity.group_name}.json"
+                    response = self.s3_client.get_object(Bucket=bucket_name, Key=group_path)
+                    group_data = json.loads(response['Body'].read().decode('utf-8'))
+
+                    if "messages" in group_data:
+                        for message_data in group_data["messages"]:
+                            msg_id = message_data.get('message_id')
+                            if msg_id in seen_message_ids:
+                                continue
+                            seen_message_ids.add(msg_id)  # Mark message as seen
+
+                            try:
+                                # Decrypt message
+                                sender = message_data.get('sender', '')
+                                if sender == f"{self.host}:{self.port}":
+                                    sender = "You"
+                                message = self.decrypt_group_message(entity, message_data)
+                                timestamp = message_data.get('timestamp', 0)  # Default to 0 if timestamp is missing
+                                display_message = f"{sender}: {message}" if sender else message
+
+                                # Add to message objects with timestamp
+                                message_objects.append({"message": display_message, "timestamp": timestamp})
+                            except Exception as e:
+                                print(f"Error decrypting S3 message: {e}")
+                                continue  # Skip to the next message
+                except Exception as e:
+                    print(f"Error fetching messages from S3 bucket '{bucket_name}': {e}")
+
+            # Inside load_messages_from_cloud function
+            # Add this block to process Cosmos DB messages
+
+            for cosmos_name in self.cosmos_names:
+                try:
+                    # Access the Cosmos DB container for the group
+                    container = self.cosmos_client.get_database_client(cosmos_name).get_container_client(f"group_{entity.group_name}")
+
+                    # Query all items in the container
+                    query_result = container.query_items(
+                        query="SELECT * FROM c",  # Simple query to fetch all items
+                        enable_cross_partition_query=True  # Enable cross-partition query if needed
+                    )
+
+                    # Process each item
+                    for item in query_result:
+                        # Skip metadata items (e.g., look for a distinguishing property like 'type')
+                        if item.get('type') == 'metadata':
+                            continue
+
+                        # Extract the message ID and check for duplicates
+                        msg_id = item.get('id')  # Assuming the ID of the item is stored in `id`
+                        if msg_id in seen_message_ids:
+                            continue
+                        seen_message_ids.add(msg_id)  # Mark as seen
+
+                        try:
+                            # Decrypt the message
+                            sender = item.get('sender', '')
+                            if sender == f"{self.host}:{self.port}":
+                                sender = "You"
+                            message = self.decrypt_group_message(entity, item)
+                            timestamp = item.get('timestamp', 0)  # Default to 0 if missing
+                            display_message = f"{sender}: {message}" if sender else message
+
+                            # Add to the message objects for sorting
+                            message_objects.append({"message": display_message, "timestamp": timestamp})
+                        except Exception as e:
+                            print(f"Error decrypting Cosmos DB message: {e}")
+                            continue  # Skip to the next message
+
+                except Exception as e:
+                    print(f"Error fetching messages from Cosmos DB database '{cosmos_name}': {e}")
+
         else: 
             
             local_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
@@ -1793,26 +2061,6 @@ class P2PChatApp:
         messages = [obj['message'] for obj in sorted_message_objects]
 
         return messages
-
-    def combine_and_deduplicate_messages(self, firebase_messages, s3_messages):
-        """
-        Combines messages from Firebase and S3, removing duplicates.
-        """
-        messages_dict = {}
-
-        # Add messages from Firebase
-        if firebase_messages:
-            for msg_id, msg_data in firebase_messages.items():
-                messages_dict[msg_id] = msg_data
-
-        # Add messages from S3, avoiding duplicates
-        if s3_messages:
-            for msg_id, msg_data in s3_messages.items():
-                if msg_id not in messages_dict:
-                    messages_dict[msg_id] = msg_data
-
-        # Return list of messages
-        return list(messages_dict.values())
 
     def perform_privacy_preserving_search(self, keywords):
         """
