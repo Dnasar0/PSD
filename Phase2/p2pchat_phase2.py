@@ -890,21 +890,17 @@ class P2PChatApp:
         except Exception as e:
             print(f"Firebase connection failed: {e}")
 
-        for s3_bucket_name in self.s3_bucket_names:
-            try:
-                print(f"Attempting to connect via S3 (bucket: {s3_bucket_name})...")
-                s3_ok = self.connect_to_group_s3(group_name, user_id)
-                break
-            except Exception as e:
-                print(f"S3 connection failed for bucket '{s3_bucket_name}': {e}")
-                
-        for cosmos_name in self.cosmos_names:
-            try:
-                print(f"Attempting to connect via Cosmos DB (database: {cosmos_name})...")
-                cosmos_ok = self.connect_to_group_cosmos(group_name, user_id)
-                break
-            except Exception as e:
-                print(f"Cosmos DB connection failed for database '{cosmos_name}': {e}")
+        try:
+            print(f'Attempting to connect via S3')
+            s3_ok = self.connect_to_group_s3(group_name, user_id)
+        except Exception as e:
+            print(f"S3 connection failed: {e}")
+            
+        try:
+            print(f"Attempting to connect via Cosmos DB...")
+            cosmos_ok = self.connect_to_group_cosmos(group_name, user_id)
+        except Exception as e:
+            print(f"Cosmos DB connection failed: {e}")
 
         # Final Step: Check if we successfully connected
         if not firebase_ok and not s3_ok and not cosmos_ok:
