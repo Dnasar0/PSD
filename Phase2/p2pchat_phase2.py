@@ -266,31 +266,35 @@ class P2PChatApp:
                     user_found = True
             except Exception as e:
                 print(f"Error checking user in Firebase {replica}: {e}")
-
-        # Check S3 buckets
-        for bucket_name in self.s3_bucket_names:
-            try:
-                s3_key = f"users/{user_id}.json"
-                response = self.s3_client.get_object(Bucket=bucket_name, Key=s3_key)
-                user_data = json.loads(response['Body'].read().decode('utf-8'))
-                print(f"User found in S3 bucket {bucket_name}: {user_id}")
-                user_found = True
-            except self.s3_client.exceptions.NoSuchKey:
-                print(f"No user data found in S3 bucket {bucket_name}.")
-            except Exception as e:
-                print(f"Error checking user in S3 bucket {bucket_name}: {e}")
                 
-        for cosmo_name in self.cosmos_names:
-            try:
-                database = self.cosmos_client.get_database_client(cosmo_name)
-                container = database.get_container_client('users')
-                user_data = container.read_item(item=user_id, partition_key=user_id)
-                print(f"User found in Cosmos DB {cosmo_name}: {user_id}")
-                user_found = True
-            except exceptions.CosmosResourceNotFoundError:
-                print(f"No user data found in Cosmos DB {cosmo_name}.")
-            except Exception as e:
-                print(f"Error checking user in Cosmos DB {cosmo_name}: {e}")
+        if not user_found:
+
+            # Check S3 buckets
+            for bucket_name in self.s3_bucket_names:
+                try:
+                    s3_key = f"users/{user_id}.json"
+                    response = self.s3_client.get_object(Bucket=bucket_name, Key=s3_key)
+                    user_data = json.loads(response['Body'].read().decode('utf-8'))
+                    print(f"User found in S3 bucket {bucket_name}: {user_id}")
+                    user_found = True
+                except self.s3_client.exceptions.NoSuchKey:
+                    print(f"No user data found in S3 bucket {bucket_name}.")
+                except Exception as e:
+                    print(f"Error checking user in S3 bucket {bucket_name}: {e}")
+                    
+        if not user_found:
+                    
+            for cosmo_name in self.cosmos_names:
+                try:
+                    database = self.cosmos_client.get_database_client(cosmo_name)
+                    container = database.get_container_client('users')
+                    user_data = container.read_item(item=user_id, partition_key=user_id)
+                    print(f"User found in Cosmos DB {cosmo_name}: {user_id}")
+                    user_found = True
+                except exceptions.CosmosResourceNotFoundError:
+                    print(f"No user data found in Cosmos DB {cosmo_name}.")
+                except Exception as e:
+                    print(f"Error checking user in Cosmos DB {cosmo_name}: {e}")
 
         return user_found
 
@@ -861,7 +865,7 @@ class P2PChatApp:
                 "shares": shares,
                 "threshold": threshold,
                 "prime_mod": prime_mod,
-                "members": {}  # Initially empty; members can be added later
+                "members": []  # Initially empty; members can be added later
             }
 
             # Store the group's metadata in the container
@@ -1792,9 +1796,10 @@ class P2PChatApp:
                     group_topic = group_data.get('topic')
                     if group_topic not in selected_topics:
                         print(f"Closing connection with group '{group}' as it is in topic '{group_topic}' that you don't have anymore.")
-                        self.remove_user_from_group(group)
+                        self.remove_user_from_group(group, user_id)
                         del self.peers[group]
                         del self.peers_historic[group]
+                        break
 
         messagebox.showinfo("Topics Saved", "Your topics of interest have been saved.")
         self.gui_app.setup_main_menu()
@@ -1841,31 +1846,29 @@ class P2PChatApp:
             
         except Exception as e:
             print(f"Error updating topics in Cosmos DB {cosmos_db_name} for user {user_id}: {e}")
-
-    def get_group_data(self, group_name):
-        """
-        Fetches group data from all cloud services.
-        """
-        for replica in self.firebase_refs:
-            group_ref = db.reference(f"{replica}/groups/{sanitize_for_firebase_path(group_name)}")
-            group_data = group_ref.get()
-            if group_data:
-                return group_data
-
-        # Add equivalent methods for AWS S3 and Cosmos DB if necessary
-        # Return None if the group is not found in any service
-        return None
     
-    def remove_user_from_group(self, group_name):
+    def remove_user_from_group(self, group_name, user_id):
         """
         Removes the user from the group in all cloud services.
         """
-        user_id = sanitize_for_firebase_path(f"{self.host}:{self.port}")  # Identify the user
-
-        # Remove from Firebase
+        # Remove the user from Firebase group members
         for replica in self.firebase_refs:
-            group_members_ref = db.reference(f"{replica}/groups/{sanitize_for_firebase_path(group_name)}/members/{user_id}")
-            group_members_ref.delete()
+            # Get the reference to the group's members list
+            group_members_ref = db.reference(f"{replica}/groups/{sanitize_for_firebase_path(group_name)}")
+            
+            group_data = group_members_ref.get()
+            
+            try:
+                # Update the members list
+                if "members" in group_data:
+                    members = [member for member in group_data["members"] if member != user_id]
+                    
+                group_members_ref.update({'members': members})
+                
+            except Exception as e:
+                print(f"Error removing user from Firebase group '{group_name}': {e}")
+
+        # You can optionally add S3 and Cosmos DB updates here as you originally had.
 
         # Update AWS S3
         for bucket_name in self.s3_bucket_names:
@@ -1894,15 +1897,15 @@ class P2PChatApp:
         for cosmos_name in self.cosmos_names:
             try:
                 # Fetch the group document
-                container = self.cosmos_client.get_database_client(cosmos_name).get_container_client("groups")
-                group_data = container.read_item(group_name, partition_key=group_name)
+                container = self.cosmos_client.get_database_client(cosmos_name).get_container_client("group_"+group_name)
+                group_data = container.read_item(item="metadata", partition_key="metadata")
 
                 # Update the members list
                 if "members" in group_data:
                     group_data["members"] = [member for member in group_data["members"] if member != user_id]
 
                 # Replace the updated document in Cosmos DB
-                container.replace_item(group_name, group_data)
+                container.replace_item(item="metadata", body=group_data)
                 print(f"Updated members for Cosmos DB group '{group_name}'.")
 
             except Exception as e:
@@ -1993,29 +1996,27 @@ class P2PChatApp:
                     # Process each item
                     for item in query_result:
                         # Skip metadata items (e.g., look for a distinguishing property like 'type')
-                        if item.get('type') == 'metadata':
+                        if item.get('type') == 'metadata' or item.get('id') in seen_message_ids:
                             continue
 
-                        # Extract the message ID and check for duplicates
-                        msg_id = item.get('id')  # Assuming the ID of the item is stored in `id`
-                        if msg_id in seen_message_ids:
-                            continue
-                        seen_message_ids.add(msg_id)  # Mark as seen
+                        seen_message_ids.add(item.get('id'))  # Mark as seen
+                        
+                        if item.get('type') != 'metadata' and item.get('id') not in seen_message_ids:
 
-                        try:
-                            # Decrypt the message
-                            sender = item.get('sender', '')
-                            if sender == f"{self.host}:{self.port}":
-                                sender = "You"
-                            message = self.decrypt_group_message(entity, item)
-                            timestamp = item.get('timestamp', 0)  # Default to 0 if missing
-                            display_message = f"{sender}: {message}" if sender else message
+                            try:
+                                # Decrypt the message
+                                sender = item.get('sender', '')
+                                if sender == f"{self.host}:{self.port}":
+                                    sender = "You"
+                                message = self.decrypt_group_message(entity, item)
+                                timestamp = item.get('timestamp', 0)  # Default to 0 if missing
+                                display_message = f"{sender}: {message}" if sender else message
 
-                            # Add to the message objects for sorting
-                            message_objects.append({"message": display_message, "timestamp": timestamp})
-                        except Exception as e:
-                            print(f"Error decrypting Cosmos DB message: {e}")
-                            continue  # Skip to the next message
+                                # Add to the message objects for sorting
+                                message_objects.append({"message": display_message, "timestamp": timestamp})
+                            except Exception as e:
+                                print(f"Error decrypting Cosmos DB message: {e}")
+                                continue  # Skip to the next message
 
                 except Exception as e:
                     print(f"Error fetching messages from Cosmos DB database '{cosmos_name}': {e}")
@@ -2025,6 +2026,7 @@ class P2PChatApp:
             local_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
             remote_id = f"{sanitize_for_firebase_path(entity.ip)}_{entity.port}"
             chat_id = f"{local_id}_{remote_id}"
+            chat_path = f"users/{chat_id}.json"
             
             for replica in self.firebase_refs:
                 chat_ref = db.reference(f"{replica}/chats/{chat_id}")
@@ -2048,7 +2050,77 @@ class P2PChatApp:
                             message_objects.append({"message": display_message, "timestamp": timestamp})
                         except Exception as e:
                             print(f"Error decrypting message: {e}")
-                            continue               
+                            continue     
+                        
+                        
+           # AWS S3
+            for bucket_name in self.s3_bucket_names:               
+            
+                response = self.s3_client.get_object(Bucket=bucket_name, Key=chat_path)
+                chat_data = json.loads(response['Body'].read().decode('utf-8'))
+
+                if "messages" in chat_data:
+                    for message_data in chat_data["messages"]:
+                        msg_id = message_data.get('message_id')
+                        if msg_id in seen_message_ids:
+                            continue
+                        seen_message_ids.add(msg_id)  # Mark message as seen
+
+                        try:
+                            # Decrypt message
+                            sender = message_data.get('sender', '')
+                            encrypted_message_bytes = bytes.fromhex(message_data['message'])
+                            message = self.decrypt_message(encrypted_message_bytes, entity.aes_key)
+                            timestamp = message_data.get('timestamp', 0)  # Default to 0 if timestamp is missing
+                            display_message = f"{sender}: {message}" if sender else message
+
+                            # Add to message objects with timestamp
+                            message_objects.append({"message": display_message, "timestamp": timestamp})
+                        except Exception as e:
+                            print(f"Error decrypting message: {e}")
+                            continue 
+
+            # Add this block to process Cosmos DB messages
+            for cosmos_name in self.cosmos_names:
+                try:
+                    local_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
+                    remote_id = f"{sanitize_for_firebase_path(entity.ip)}_{entity.port}"
+                    chat_id = f"{local_id}_{remote_id}"                     
+                    # Access the Cosmos DB container for the group
+                    container = self.cosmos_client.get_database_client(cosmos_name).get_container_client(f"chat_{chat_id}")
+
+                    # Query all items in the container
+                    query_result = container.query_items(
+                        query="SELECT * FROM c",  # Simple query to fetch all items
+                        enable_cross_partition_query=True  # Enable cross-partition query if needed
+                    )
+
+                    # Process each item
+                    for item in query_result:
+                        # Skip metadata items (e.g., look for a distinguishing property like 'type')
+                        if item.get('type') == 'metadata' or item.get('id') in seen_message_ids:
+                            continue
+
+                        seen_message_ids.add(item.get('id'))  # Mark as seen
+                        
+                        if item.get('type') != 'metadata' and item.get('id') not in seen_message_ids:
+
+                            try:
+                                # Decrypt message
+                                sender = message_data.get('sender', '')
+                                encrypted_message_bytes = bytes.fromhex(message_data['message'])
+                                message = self.decrypt_message(encrypted_message_bytes, entity.aes_key)
+                                timestamp = message_data.get('timestamp', 0)  # Default to 0 if timestamp is missing
+                                display_message = f"{sender}: {message}" if sender else message
+
+                                # Add to message objects with timestamp
+                                message_objects.append({"message": display_message, "timestamp": timestamp})
+                            except Exception as e:
+                                print(f"Error decrypting message: {e}")
+                                continue 
+
+                except Exception as e:
+                    print(f"Error fetching messages from Cosmos DB database '{cosmos_name}': {e}")                                  
 
         # Sort messages by timestamp
         sorted_message_objects = sorted(message_objects, key=lambda x: x['timestamp'])
