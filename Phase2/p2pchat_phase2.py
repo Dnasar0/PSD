@@ -76,6 +76,73 @@ def sanitize_for_firebase_path(s):
     # Replace invalid characters in Firebase paths with underscores
     return s.replace('.', '_').replace('$', '_').replace('#', '_').replace('[', '_').replace(']', '_').replace('/', '_')
 
+def add_ads_to_DB(
+    s3_client, 
+    cosmos_client,
+    s3_buckets,  # List of bucket names
+    fb_replicas,  # List of Firebase database references
+    cosmos_names, # List of Cosmos DB names
+):
+    
+    ads = {
+        "ad1": {'text': "Get 50% off on sports gear!", 'topic': "Cars"},
+        "ad2": {'text': "Learn AI with our online course!", 'topic': "AI"},
+        "ad3": {'text': "Get 75% off on gears!", 'topic': "Cars"},
+        "ad4": {'text': "Football meeting", 'topic': "Soccer"},
+        "ad5": {'text': "Basketball game on Sunday", 'topic': "Basketball"},
+        "ad6": {'text': "Hacker Wanted", 'topic': "Cybersecurity"},
+        "ad7": {'text': "Selling Albums", 'topic': "Music"}
+        }
+    
+    # Store data in all Firebase replicas
+    for i, replica in enumerate(fb_replicas):
+        try:
+            ad_ref = db.reference(f"{replica}/ads")
+            # Correctly access the public key share from the tuple and convert it to hex
+            ad_ref.set(ads)
+            print(f"Ads added in Firebase {replica}")
+        except Exception as e:
+            print(f"Failed to create user in Firebase {replica}: {e}")
+    
+    # Store data in all S3 buckets
+    for i, bucket_name in enumerate(s3_buckets):
+        try:
+            s3_key = f"ads.json"
+            s3_client.put_object(
+                Bucket=bucket_name,
+                Key=s3_key,
+                Body=json.dumps(ads),
+                ContentType='application/json'
+            )
+            print(f"User data uploaded to S3 bucket {bucket_name}")
+        except Exception as e:
+            print(f"Failed to upload user data to S3 bucket {bucket_name}: {e}")
+                    
+    # Store data in all Cosmos DB databases
+    for i, cosmos_name in enumerate(cosmos_names):
+        try:
+            # Get or create the database
+            database = cosmos_client.create_database_if_not_exists(id=cosmos_name)
+
+            # Get or create the container (with "user_id" as the partition key)
+            container = database.create_container_if_not_exists(
+                id='ads',
+                partition_key=PartitionKey(path="/id"),  # Use "user_id" as the partition key
+            )
+
+            for ad_id, ad_data in ads.items():
+                document = {
+                    "id": ad_id,  # Identificador único do documento
+                    "text": ad_data['text'],
+                    "topic": ad_data['topic']
+                }
+                container.upsert_item(body=document)
+            print(f"User data added to Cosmos DB {cosmos_name}")
+        except exceptions.CosmosResourceExistsError:
+            print(f"User already exists in Cosmos DB {cosmos_name}")
+        except Exception as e:
+            print(f"Failed to create user in Cosmos DB {cosmos_name}: {e}")
+
 # Main P2P Chat Application class
 class P2PChatApp:
     def __init__(self, host, port):
@@ -98,7 +165,13 @@ class P2PChatApp:
         self.private_key, self.public_key = self.generate_ecdh_key_pair()
 
         self.initialize_user()
-        
+        add_ads_to_DB(
+            self.s3_client, 
+            self.cosmos_client,
+            self.s3_bucket_names,
+            self.firebase_refs,
+            self.cosmos_names 
+        )
         # Serialize the public key to bytes for transmission
         self.public_key_bytes = self.public_key.public_bytes(
             encoding=serialization.Encoding.PEM,
@@ -131,12 +204,12 @@ class P2PChatApp:
         # Initialize Firebase Admin SDK with credentials and database URL
         if not firebase_admin._apps:
             #cred = credentials.Certificate("psdproject-6e38f-firebase-adminsdk-icq10-3708af2f3d.json")
-            cred = credentials.Certificate("projetopsd-5a681-19d45fdfc118.json")
-            #cred = credentials.Certificate("projetopsd-6abec-firebase-adminsdk-tf6mp-1a2522b1cb.json")
+            #cred = credentials.Certificate("projetopsd-5a681-19d45fdfc118.json")
+            cred = credentials.Certificate("projetopsd-6abec-firebase-adminsdk-tf6mp-1a2522b1cb.json")
             firebase_admin.initialize_app(cred, {
                 #'databaseURL': 'https://psdproject-6e38f-default-rtdb.europe-west1.firebasedatabase.app/'
-                'databaseURL': 'https://projetopsd-5a681-default-rtdb.europe-west1.firebasedatabase.app/'
-                #'databaseURL': 'https://projetopsd-6abec-default-rtdb.europe-west1.firebasedatabase.app/'
+                #'databaseURL': 'https://projetopsd-5a681-default-rtdb.europe-west1.firebasedatabase.app/'
+                'databaseURL': 'https://projetopsd-6abec-default-rtdb.europe-west1.firebasedatabase.app/'
             })
 
             # Initialize AWS S3 client
@@ -195,7 +268,8 @@ class P2PChatApp:
         base_user_data = {
             'topics': ['None'],
             'prime': prime_mod,
-            'threshold': t
+            'threshold': t,
+            'topics_scores': None
         }
 
         # Store data in all Firebase replicas
@@ -1316,35 +1390,66 @@ class P2PChatApp:
         
             if entity.is_group:
             
-                # Save to Firebase
+                # Save chat to Firebase
                 group_id = sanitize_for_firebase_path(entity.group_name)
                 group_ref = db.reference(f"{replica}/groups/{group_id}/messages")
                 group_ref.child(message_id).set(data)  # Use message_id as key
-                #Save to AWS S3
+                
+                # Save topic scores to Firebase
+                if not topic_scores == None:
+                    local_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
+                    topic_scores_ref = db.reference(f"{replica}/users/{local_id}/topic_scores")
+                    scores_in_db = topic_scores_ref.get()
+
+                    if isinstance(scores_in_db, list):
+                        for i in range(len(topic_scores)):
+                            scores_in_db[i] += topic_scores[i]
+                        topic_scores_ref.set(scores_in_db)
+                    else:
+                        topic_scores_ref.set(topic_scores)
+                        
+                #Save chat to AWS S3
                 self.save_to_aws_s3(f"groups/{group_id}/messages/{message_id}.json", data, s3_bucket_name)
+                
+                # Save topic scores to S3
+                self.save_topic_to_aws_s3(local_id, scores_in_db, s3_bucket_name)
+                
+                #Save chat to Cosmos
                 self.save_to_cosmos(group_id, data, cosmos_name, True)
+                
+                # Save topic scores to Cosmos
+                self.save_topic_to_cosmos(local_id, scores_in_db, cosmos_name)
             else:
-                # Save to Firebase
+                # Save chat to Firebase
                 chat_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}_{sanitize_for_firebase_path(entity.ip)}_{entity.port}"
                 chat_ref = db.reference(f"{replica}/chats/{chat_id}")
                 chat_ref.child(message_id).set(data)
-                # Save to AWS S3
-                self.save_to_aws_s3(f"chats/{chat_id}/{message_id}.json", data, s3_bucket_name)
-                self.save_to_cosmos(chat_id, data, cosmos_name, False)
+                
+                # Save topic scores to Firebase
+                if not topic_scores == None:
+                    local_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
+                    topic_scores_ref = db.reference(f"{replica}/users/{local_id}/topic_scores")
+                    scores_in_db = topic_scores_ref.get()
 
-            if not topic_scores == None:
-                local_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
-                topic_scores_ref = db.reference(f"{replica}/users/{local_id}/topic_scores")
-                scores_in_db = topic_scores_ref.get()
+                    if isinstance(scores_in_db, list):
+                        for i in range(len(topic_scores)):
+                            scores_in_db[i] += topic_scores[i]
+                        topic_scores_ref.set(scores_in_db)
+                    else:
+                        topic_scores_ref.set(topic_scores)
+                        
+                # Save chat to AWS S3
+                self.save_to_aws_s3(f"chats/{chat_id}/{message_id}.json", data, s3_bucket_name)
                 
-                if isinstance(scores_in_db, list):
-                    for i in range(len(topic_scores)):
-                        scores_in_db[i] += topic_scores[i]
-                    topic_scores_ref.set(scores_in_db)
-                else:
-                    topic_scores_ref.set(topic_scores)                
+                # Save topic scores to S3
+                self.save_topic_to_aws_s3(local_id, scores_in_db, s3_bucket_name)
                 
+                #Save chat to Cosmos
+                self.save_to_cosmos(chat_id, data, cosmos_name, False)
                 
+                # Save topic scores to Cosmos     
+                self.save_topic_to_cosmos(local_id, scores_in_db, cosmos_name)           
+
     def save_to_aws_s3(self, path, data, s3_bucket_name):
         """
         Saves data to AWS S3 in JSON format.
@@ -1356,6 +1461,24 @@ class P2PChatApp:
             Bucket=s3_bucket_name,
             Key=key,
             Body=json_data
+        )
+        
+    def save_topic_to_aws_s3(self,user_id, data, s3_bucket_name):
+        """
+        Saves data to AWS S3 in JSON format.
+        """
+        # Recuperar o conteúdo atual da chave
+        s3_key = f"users/{user_id}.json"
+        response = self.s3_client.get_object(Bucket=s3_bucket_name, Key=s3_key)
+        user = json.loads(response['Body'].read().decode('utf-8'))
+        user['topics_scores']=data
+        # Ensure that data is JSON serializable
+        json_user = json.dumps(user)
+        self.s3_client.put_object(
+            Bucket=s3_bucket_name,
+            Key=s3_key,
+            Body=json_user,
+            ContentType='application/json'
         )
         
     def save_to_cosmos(self, chat_id, data, cosmos_name, is_group):
@@ -1379,6 +1502,24 @@ class P2PChatApp:
 
             # Insert or update the message data in the container
             container.create_item(body=data)
+        except Exception as e:
+            print(f"Error saving message to Cosmos DB: {e}")
+            
+    def save_topic_to_cosmos(self, user_id, data, cosmos_name):
+        """
+        Saves chat messages to a Cosmos DB container dynamically created for each chat.
+        """
+        try:
+            # Get Cosmos database and container
+            database = self.cosmos_client.get_database_client(cosmos_name)
+            container = database.get_container_client("users")
+
+            user_doc = container.read_item(item=user_id, partition_key=user_id)
+            user_doc.update({'topics_scores': data})
+            
+            # Update the user document in Cosmos DB
+            container.replace_item(item=user_doc['id'], body=user_doc)
+            
         except Exception as e:
             print(f"Error saving message to Cosmos DB: {e}")
 
@@ -1885,40 +2026,92 @@ class P2PChatApp:
         """
         Analyzes the client's own message history to determine recommended topics and groups.
         """
-            
-        #Ir buscar topic_scores à base de dados
-        local_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
         
-        #for replica, s3_bucket_name in zip(self.firebase_refs, self.s3_bucket_names):
-        for replica in self.firebase_refs:
-            topic_scores = db.reference(f"{replica}/users/{local_id}/topic_scores").get()
-            break
+        topic_scores = self.get_topic_scores()
         
         topics = list(self.topic_embeddings.keys())
         
         #Encontrar os dois maiores índices e valores correspondentes
-        sorted_indices = sorted(range(len(topic_scores)), key=lambda i: topic_scores[i], reverse=True)
-        top_indices = sorted_indices[:2]  # Pegar os dois maiores índices
+        if not topic_scores == None:
+            sorted_indices = sorted(range(len(topic_scores)), key=lambda i: topic_scores[i], reverse=True)
+            top_indices = sorted_indices[:2]  # Pegar os dois maiores índices
         
-        #Obter os tópicos correspondentes aos maiores índices
-        top_two_topics = [topics[i] for i in top_indices]
-        print(top_two_topics)
-        
-        # Step 4: Fetch ads from Firebase and generate mappings
-        ads = self.fetch_ads_from_database()  # Fetch ads from Firebase
-
-        #topic_to_ads_map, ads_embeddings = self.generate_topic_to_ads_map(ads)  # Map ads to topics
-        oram = ORAM.InMemoryORAM(ads)  # Initialize ORAM-like storage
-        
-        # Step 5: Retrieve ads related to the top two topics
-        recommendations = self.fetch_ads_for_topics(
-            oram,
-            [topic for topic in top_two_topics],  # Top two topics identified
-            ads
-        )
-
+            #Obter os tópicos correspondentes aos maiores índices
+            top_two_topics = [topics[i] for i in top_indices]
+            print(top_two_topics)
+            
+            # Step 4: Fetch ads from Firebase and generate mappings
+            ads = self.fetch_ads_from_database()  # Fetch ads from Firebase
+    
+            #topic_to_ads_map, ads_embeddings = self.generate_topic_to_ads_map(ads)  # Map ads to topics
+            oram = ORAM.InMemoryORAM(ads)  # Initialize ORAM-like storage
+            
+            # Step 5: Retrieve ads related to the top two topics
+            recommendations = self.fetch_ads_for_topics(
+                oram,
+                [topic for topic in top_two_topics],  # Top two topics identified
+                ads
+            )
+        else:
+            recommendations = []
         # Step 6: Return the matching ads for the top topics
         return recommendations
+    
+    def get_topic_scores(self):
+        #Ir buscar topic_scores à base de dados
+        local_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
+        
+        found = False
+        
+        for replica in self.firebase_refs:
+            try:
+                topic_scores = db.reference(f"{replica}/users/{local_id}/topic_scores").get()
+
+                if topic_scores is not None:
+                    found = True
+                    print(f"Topics scores found in Firebase {replica}")
+                    break
+            except Exception as e:
+                print(f"Error checking user in Firebase {replica}: {e}")
+        
+        if not found:
+            for bucket_name in self.s3_bucket_names:
+                try:
+                    s3_key = f"users/{local_id}.json"
+                    response = self.s3_client.get_object(Bucket=bucket_name, Key=s3_key)
+                    user_data = json.loads(response['Body'].read().decode('utf-8'))
+                    topic_scores = user_data['topics_scores']
+                    
+                    if topic_scores is not None:
+                        print(f"Topics scores found in S3 bucket {bucket_name}")
+                        found = True
+                        break
+                except self.s3_client.exceptions.NoSuchKey:
+                    print(f"No Topics scores found in S3 bucket {bucket_name}.")
+                except Exception as e:
+                    print(f"Error checking Topics scores in S3 bucket {bucket_name}: {e}")
+        
+        if not found:
+            for cosmo_name in self.cosmos_names:
+                try:
+                    database = self.cosmos_client.get_database_client(cosmo_name)
+                    container = database.get_container_client('users')
+                    user_data = container.read_item(item=local_id, partition_key=local_id)
+                    topic_scores = user_data
+                    topic_scores = topic_scores['topics_scores']
+
+                    if topic_scores is not None:
+                        print(f"Topics scores found in Cosmos DB {cosmo_name}")
+                        found = True
+                        break
+                except exceptions.CosmosResourceNotFoundError:
+                    print(f"No Topics scores found in Cosmos DB {cosmo_name}.")
+                except Exception as e:
+                    print(f"Error checking Topics scores in Cosmos DB {cosmo_name}: {e}")
+            
+        print("PRODUTO FINAL")
+        print(topic_scores)
+        return topic_scores
     
     def get_message_embeddings(self, message):
         """
@@ -1976,11 +2169,65 @@ class P2PChatApp:
         """
         Fetch ads from Firebase. Each ad includes a topic and text.
         """
-        # Reference the 'ads' path in Firebase
-        ads_ref = db.reference("ads")
+        found = False
+        # Search ads in Firebase
+        for replica in self.firebase_refs:
+            try:
+                ads_ref = db.reference(f"{replica}/ads").get()
+                if ads_ref is not None:
+                    found = True
+                    print(f"Ads found in Firebase {replica}.")
+                    break
+            except Exception as e:
+                print(f"Error checking user in Firebase {replica}: {e}")
+        
+        # Search ads in S3
+        if not found:
+            for bucket_name in self.s3_bucket_names:
+                try:
+                    s3_key = f"ads.json"
+                    response = self.s3_client.get_object(Bucket=bucket_name, Key=s3_key)
+                    ads_ref = json.loads(response['Body'].read().decode('utf-8'))
+                    if ads_ref is not None:
+                        print(f"Ads found in S3 bucket {bucket_name}")
+                        found = True
+                        break
+                except self.s3_client.exceptions.NoSuchKey:
+                    print(f"No user data found in S3 bucket {bucket_name}.")
+                except Exception as e:
+                    print(f"Error checking user in S3 bucket {bucket_name}: {e}")
+                    
+        # Search ads in Cosmos DB
+        if not found:
+            for cosmo_name in self.cosmos_names:
+                try:
+                    database = self.cosmos_client.get_database_client(cosmo_name)
+                    container = database.get_container_client('ads')
+                    # Recuperar todos os documentos
+                    query = "SELECT * FROM c"  # Consulta para selecionar todos os documentos
+
+                    # Inicializar o dicionário para armazenar os anúncios
+                    ads_ref = {}
+                    
+                    # Executar a consulta e iterar sobre os resultados
+                    for item in container.query_items(query=query, enable_cross_partition_query=True):
+                        # Adicionar o anúncio ao dicionário usando o "id" como chave
+                        ads_ref[item["id"]] = {
+                            "text": item["text"],
+                            "topic": item["topic"]
+                        }
+                        
+                    if ads_ref is not None:
+                        print(f"Ads found in Cosmos DB {cosmo_name}")
+                        found = True
+                        break
+                except exceptions.CosmosResourceNotFoundError:
+                    print(f"No ads found in Cosmos DB {cosmo_name}.")
+                except Exception as e:
+                    print(f"Error checking ads in Cosmos DB {cosmo_name}: {e}")
         
         # Retrieve all ads as a list
-        ads_data = ads_ref.get()
+        ads_data = ads_ref
 
         if not ads_data:
             print("No ads found in the database.")
