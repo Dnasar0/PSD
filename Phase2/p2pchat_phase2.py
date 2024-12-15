@@ -2419,13 +2419,6 @@ class P2PChatApp:
 
         #self.messages_loaded = True  # Set the flag to indicate messages are loaded
 
-    def load_ad_embeddings(self):
-        # Load ads from Firebase
-        ads_ref = db.reference(f"ads")
-        ads_data = ads_ref.get()
-        
-        return ads_data
-
     def get_recommendations(self):
         """
         Analyzes the client's own message history to determine recommended topics and groups.
