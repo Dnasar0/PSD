@@ -1192,6 +1192,7 @@ class P2PChatApp:
         """
         try:
             s3_key = f"users/{user_id}.json"
+            print(s3_key)
             response = self.s3_client.get_object(Bucket=s3_bucket_name, Key=s3_key)
             user_data = json.loads(response['Body'].read().decode('utf-8'))
             return user_data.get('topics', [])
@@ -1776,6 +1777,8 @@ class P2PChatApp:
             # Retrieve the group key
             group_key_hex = self.get_group_key(group_entity)
             group_key = bytes.fromhex(group_key_hex)
+            print(f"Group key: {group_key_hex}")
+            
 
             # Extract the encrypted message from the data
             if isinstance(encrypted_message_data, dict):
@@ -1820,8 +1823,10 @@ class P2PChatApp:
             group_ref = db.reference(f"{replica}/groups/{group_id}")
             group_data = group_ref.get()
             
-            if group_data == None:
-                print(f"No data found for group '{group_entity.group_name}' at {replica}/groups/{group_id}.")
+            print(f"Group data: {group_data}")
+            
+            if group_data == None or ('shares' not in group_data and 'threshold' not in group_data and 'prime_mod' not in group_data):
+                print(f"No data found for group '{group_entity.group_name}' at {replica}/groups/{group_id} in Firebase.")
                 continue  # or raise an appropriate error
 
 
@@ -1850,7 +1855,7 @@ class P2PChatApp:
                     print(f"Reconstructed group key: {reconstructed_key.hex()}")
                     return reconstructed_key.hex()
 
-            raise ValueError(f"Unable to retrieve or reconstruct the group key for '{group_entity.group_name}'.")
+            raise ValueError(f"Unable to retrieve or reconstruct the group key for '{group_entity.group_name}' in S3.")
 
         print("Not found in Firebase")
         
@@ -1869,7 +1874,7 @@ class P2PChatApp:
                 group_data = json.loads(response['Body'].read().decode('utf-8'))
                 
                 if group_data == None:
-                    print(f"No data found for group '{group_entity.group_name}' at {s3_bucket_name}/{s3_key}.")
+                    print(f"No data found for group '{group_entity.group_name}' at {s3_bucket_name}/{s3_key} in Cosmos DB")
                     continue  # or raise an appropriate error
                         
 
@@ -2144,55 +2149,44 @@ class P2PChatApp:
                             print(f"Error decrypting Firebase message: {e}")
                             continue  # Skip to the next message
                         
-            # AWS S3
-            for bucket_name in self.s3_bucket_names:
-                try:
-                    # Define the group folder path
-                    group_folder_path = f"groups/{entity.group_name}/"
+        # AWS S3
+            for bucket_name in self.s3_bucket_names:               
+                
+                # List all objects in the chat directory
+                group_path = f"groups/{group_id}/messages/"
+                response = self.s3_client.list_objects_v2(Bucket=bucket_name, Prefix=group_path)
+                
+                if "Contents" not in response:
+                    print(f"No messages found for group ID {group_id} in S3 bucket {bucket_name}.")
+                    continue
 
-                    # List all objects in the group folder
-                    response = self.s3_client.list_objects_v2(Bucket=bucket_name, Prefix=group_folder_path)
+                for obj in response["Contents"]:
 
-                    # Check if there are objects (messages) in the folder
-                    if 'Contents' in response:
-                        for obj in response['Contents']:
-                            file_key = obj['Key']
-                            
-                            # Skip non-message files (like metadata or folder keys)
-                            if file_key.endswith('/'):
-                                continue
+                    # Fetch the message JSON
+                    response = self.s3_client.get_object(Bucket=bucket_name, Key=obj["Key"])
+                    message_data = json.loads(response["Body"].read().decode("utf-8"))
 
-                            # Fetch the individual message file
-                            try:
-                                message_response = self.s3_client.get_object(Bucket=bucket_name, Key=file_key)
-                                message_data = json.loads(message_response['Body'].read().decode('utf-8'))
+                    # Check if the message is already processed
+                    msg_id = message_data.get("message_id")
+                    if msg_id in seen_message_ids:
+                        continue
+                    seen_message_ids.add(msg_id)  # Mark as seen
 
-                                # Process the message
-                                msg_id = message_data.get('message_id')
-                                if msg_id in seen_message_ids:
-                                    continue
-                                seen_message_ids.add(msg_id)  # Mark message as seen
+                    try:
+                        # Decrypt message
+                        sender = message_data.get('sender', '')
+                        if sender == f"{self.host}:{self.port}":
+                            sender = "You"
+                        message = self.decrypt_group_message(entity, message_data.get('message'))
+                        timestamp = message_data.get('timestamp', 0)  # Default to 0 if timestamp is missing
+                        display_message = f"{sender}: {message}" if sender else message
 
-                                try:
-                                    # Decrypt message
-                                    sender = message_data.get('sender', '')
-                                    if sender == f"{self.host}:{self.port}":
-                                        sender = "You"
-                                    message = self.decrypt_group_message(entity, message_data.get('message', ''))
-                                    timestamp = message_data.get('timestamp', 0)  # Default to 0 if timestamp is missing
-                                    display_message = f"{sender}: {message}" if sender else message
+                        # Add the message to the message objects with timestamp for sorting
+                        message_objects.append({"message": display_message, "timestamp": timestamp})
+                    except Exception as e:
+                        print(f"Error decrypting message from {message_key}: {e}")
+                        continue  # Skip to the next message
 
-                                    # Add to message objects with timestamp
-                                    message_objects.append({"message": display_message, "timestamp": timestamp})
-                                except Exception as e:
-                                    print(f"Error decrypting S3 message: {e}")
-                                    continue  # Skip to the next message
-
-                            except Exception as e:
-                                print(f"Error fetching message '{file_key}' from S3 bucket '{bucket_name}': {e}")
-
-                except Exception as e:
-                    print(f"Error listing messages in S3 bucket '{bucket_name}' group folder: {e}")
 
             # Inside load_messages_from_cloud function
             # Add this block to process Cosmos DB messages
