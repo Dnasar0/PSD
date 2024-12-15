@@ -1653,9 +1653,9 @@ class P2PChatApp:
             Body=json_data
         )
         
-    def save_topic_to_aws_s3(self,user_id, data, s3_bucket_name):
+    def save_topic_to_aws_s3(self, user_id, data, s3_bucket_name):
         """
-        Saves data to AWS S3 in JSON format.
+        Saves topics scores to AWS S3 in JSON format.
         """
         # Recuperar o conteúdo atual da chave
         s3_key = f"users/{user_id}.json"
@@ -1697,7 +1697,7 @@ class P2PChatApp:
             
     def save_topic_to_cosmos(self, user_id, data, cosmos_name):
         """
-        Saves chat messages to a Cosmos DB container dynamically created for each chat.
+        Saves topics scores messages to a Cosmos DB container dynamically created for each chat.
         """
         try:
             # Get Cosmos database and container

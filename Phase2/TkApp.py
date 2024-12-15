@@ -146,7 +146,6 @@ class TkApp:
             return topics_data.get('topics', [])
         except Exception as e:
             print(f"Error fetching topics from S3: {e}")
-            messagebox.showerror("Error", "Unable to load topics from both Firebase and S3.")
             return []
         
     def get_topics_from_cosmos(self, user_id, cosmos_name):
@@ -156,12 +155,11 @@ class TkApp:
         try:
             database = self.p2p.cosmos_client.get_database_client(cosmos_name)
             container = database.get_container_client("users")
-            user_data = container.read_item(item=user_id)
+            user_data = container.read_item(item=user_id, partition_key=user_id)
             print(f"Fetched topics for user {user_id} from Cosmos DB.")
             return user_data.get('topics', [])
         except Exception as e:
             print(f"Error fetching topics from Cosmos DB: {e}")
-            messagebox.showerror("Error", "Unable to load topics from Firebase, S3, and Cosmos DB.")
             return []
 
 
@@ -248,11 +246,26 @@ class TkApp:
                         raise Exception("No topics found in Firebase")
                 except Exception as e:
                     print(f"Error fetching user topics from Firebase: {e}")
-                    # If Firebase fails, fall back to getting topics from S3
                     
-                    for s3_bucket_name in self.p2p.getS3BucketNames():
-                        
-                        user_topics = self.get_topics_from_s3(user_id, s3_bucket_name)
+                    # If Firebase fails, fall back to getting topics from S3
+                    try:
+                        for s3_bucket_name in self.p2p.getS3BucketNames():
+                            user_topics = self.get_topics_from_s3(user_id, s3_bucket_name)
+                            #user_topics = []
+                        if user_topics == []:
+                            raise Exception("No topics found in S3")
+                    except Exception as e:
+                        print(f"Error fetching user topics from S3: {e}")
+                    
+                        try:
+                            # If S3 fails, fall back to getting topics from Cosmos
+                            for cosmos_name in self.p2p.getCosmosNames():
+                                user_topics = self.get_topics_from_cosmos(user_id, cosmos_name)
+
+                            if user_topics == []:
+                                raise Exception("No topics found in Cosmos")
+                        except Exception as e:
+                            print(f"Error fetching user topics from S3: {e}")
 
         if not user_topics:
             messagebox.showerror("Error", "You have not selected any topics of interest. Please select topics before connecting to groups.")
@@ -263,18 +276,35 @@ class TkApp:
         
         # Get group names from S3
         s3_groups = self.get_group_names_from_s3(user_topics)
+        
+        # Get group names from Cosmos
+        cosmos_groups = self.get_group_names_from_cosmos(user_topics)
 
         # Compare the number of groups from Firebase and S3
-        if len(firebase_groups) > len(s3_groups):
-            print("Firebase has more groups. Displaying Firebase groups.")
-            available_groups = firebase_groups
-        elif len(firebase_groups) < len(s3_groups):
-            print("S3 has more groups. Displaying S3 groups.")
-            available_groups = s3_groups
-        else:
-            print("Both Firebase and S3 have the same number of groups. Displaying either.")
-            available_groups = firebase_groups  # Or s3_groups, as they're the same length
+        
+        firebase_count = len(firebase_groups)
+        s3_count = len(s3_groups)
+        cosmos_count = len(cosmos_groups)
 
+        print(f"Firebase has {firebase_count} groups.")
+        print(f"AWS S3 has {s3_count} groups.")
+        print(f"CosmosDB has {cosmos_count} groups.")
+
+        # Determine which set of groups to display
+        if firebase_count > max(s3_count, cosmos_count):
+            print("Firebase has the most groups. Displaying Firebase groups.")
+            available_groups = firebase_groups
+        elif s3_count > max(firebase_count, cosmos_count):
+            print("AWS S3 has the most groups. Displaying S3 groups.")
+            available_groups = s3_groups
+        elif cosmos_count > max(firebase_count, s3_count):
+            print("CosmosDB has the most groups. Displaying CosmosDB groups.")
+            available_groups = cosmos_groups
+        else:
+            print("Multiple sources have the same number of groups. Displaying merged groups.")
+            # Merge groups while removing duplicates
+            available_groups = list(set(firebase_groups + s3_groups + cosmos_groups))
+            
         # Display the available groups (whether from Firebase or S3)
         label = tk.Label(self.group_inputs_frame, text="Select a Group:")
         label.pack()
@@ -351,6 +381,45 @@ class TkApp:
                 print(f"Error fetching groups from S3: {e}")
         return list(dict.fromkeys(groups))
    
+    def get_group_names_from_cosmos(self, user_topics):
+        """
+        Fetches group names from CosmosDB based on the user's topics.
+        """
+        groups = []
+        
+        for cosmos_name in self.p2p.getCosmosNames():
+        
+            try:
+                # Connect to the CosmosDB database and container
+                database = self.p2p.cosmos_client.get_database_client(cosmos_name)
+                
+                containers = list(database.list_containers())
+                
+                for container_info in containers:
+                    container_id = container_info['id']
+
+                    try:
+                        # Check if the container name matches the "group_" pattern
+                        if container_id.startswith("group_"):
+                            container = database.get_container_client(container_id)
+
+                            # Retrieve the group's metadata document
+                            group_metadata = container.read_item(item="metadata", partition_key="metadata")
+                            
+                            group_topic = group_metadata.get("topic")  # Extract the group's topic
+
+                            # If the topic matches, add the group name (without "group_" prefix)
+                            if group_topic in user_topics:
+                                group_name = container_id.replace("group_", "")
+                                groups.append(group_name)
+
+                    except Exception as e:
+                        print(f"Error querying container {container_id}: {e}")
+                    
+            except Exception as e:
+                print(f"Error fetching groups from S3: {e}")
+        print(list(dict.fromkeys(groups)))
+        return list(dict.fromkeys(groups))
 
     def connect_to_selected_entity(self):
         """
