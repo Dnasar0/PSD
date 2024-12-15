@@ -113,7 +113,7 @@ def add_ads_to_DB(
                 Body=json.dumps(ads),
                 ContentType='application/json'
             )
-            print(f"User data uploaded to S3 bucket {bucket_name}")
+            print(f"User ads uploaded to S3 bucket {bucket_name}")
         except Exception as e:
             print(f"Failed to upload user data to S3 bucket {bucket_name}: {e}")
                     
@@ -203,12 +203,12 @@ class P2PChatApp:
         # Initialize Firebase Admin SDK with credentials and database URL
         if not firebase_admin._apps:
             #cred = credentials.Certificate("psdproject-6e38f-firebase-adminsdk-icq10-3708af2f3d.json")
-            #cred = credentials.Certificate("projetopsd-5a681-19d45fdfc118.json")
-            cred = credentials.Certificate("projetopsd-6abec-firebase-adminsdk-tf6mp-1a2522b1cb.json")
+            cred = credentials.Certificate("projetopsd-5a681-19d45fdfc118.json")
+            #cred = credentials.Certificate("projetopsd-6abec-firebase-adminsdk-tf6mp-1a2522b1cb.json")
             firebase_admin.initialize_app(cred, {
                 #'databaseURL': 'https://psdproject-6e38f-default-rtdb.europe-west1.firebasedatabase.app/'
-                #'databaseURL': 'https://projetopsd-5a681-default-rtdb.europe-west1.firebasedatabase.app/'
-                'databaseURL': 'https://projetopsd-6abec-default-rtdb.europe-west1.firebasedatabase.app/'
+                'databaseURL': 'https://projetopsd-5a681-default-rtdb.europe-west1.firebasedatabase.app/'
+                #'databaseURL': 'https://projetopsd-6abec-default-rtdb.europe-west1.firebasedatabase.app/'
             })
 
             # Initialize AWS S3 client
@@ -1585,9 +1585,13 @@ class P2PChatApp:
                 group_ref = db.reference(f"{replica}/groups/{group_id}/messages")
                 group_ref.child(message_id).set(data)  # Use message_id as key
                 
+                local_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"                
+                
+                scores_in_db = None
+                
                 # Save topic scores to Firebase
                 if not topic_scores == None:
-                    local_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
+
                     topic_scores_ref = db.reference(f"{replica}/users/{local_id}/topic_scores")
                     scores_in_db = topic_scores_ref.get()
 
@@ -1615,9 +1619,13 @@ class P2PChatApp:
                 chat_ref = db.reference(f"{replica}/chats/{chat_id}")
                 chat_ref.child(message_id).set(data)
                 
+                local_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
+                
+                scores_in_db = None
+                
                 # Save topic scores to Firebase
                 if not topic_scores == None:
-                    local_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
+                    
                     topic_scores_ref = db.reference(f"{replica}/users/{local_id}/topic_scores")
                     scores_in_db = topic_scores_ref.get()
 
@@ -1627,7 +1635,7 @@ class P2PChatApp:
                         topic_scores_ref.set(scores_in_db)
                     else:
                         topic_scores_ref.set(topic_scores)
-                        
+                    
                 # Save chat to AWS S3
                 self.save_to_aws_s3(f"chats/{chat_id}/{message_id}.json", data, s3_bucket_name)
                 
@@ -1644,13 +1652,13 @@ class P2PChatApp:
         """
         Saves data to AWS S3 in JSON format.
         """
-        key = f"{path}/{secrets.token_hex(16)}.json"
         # Ensure that data is JSON serializable
         json_data = json.dumps(data)
         self.s3_client.put_object(
             Bucket=s3_bucket_name,
-            Key=key,
-            Body=json_data
+            Key=path,
+            Body=json_data,
+            ContentType='application/json'
         )
         
     def save_topic_to_aws_s3(self, user_id, data, s3_bucket_name):
@@ -1811,6 +1819,11 @@ class P2PChatApp:
             group_id = sanitize_for_firebase_path(group_entity.group_name)
             group_ref = db.reference(f"{replica}/groups/{group_id}")
             group_data = group_ref.get()
+            
+            if group_data == None:
+                print(f"No data found for group '{group_entity.group_name}' at {replica}/groups/{group_id}.")
+                continue  # or raise an appropriate error
+
 
             # Reconstruct the key using SSS if shares are present
             if 'shares' in group_data and 'threshold' in group_data and 'prime_mod' in group_data:
@@ -1831,105 +1844,107 @@ class P2PChatApp:
                     "prime_mod": prime_mod,
                     "required_shares": threshold
                 })
-
-                # Store the reconstructed key back in Firebase for future use
-                group_key_hex = reconstructed_key.hex()
-                group_ref.update({"group_key": group_key_hex})
-                found = True
-                return group_key_hex
+                
+                if reconstructed_key:
+                    found = True
+                    print(f"Reconstructed group key: {reconstructed_key.hex()}")
+                    return reconstructed_key.hex()
 
             raise ValueError(f"Unable to retrieve or reconstruct the group key for '{group_entity.group_name}'.")
+
+        print("Not found in Firebase")
         
         if not found:
             
             # Do the same for S3
             for s3_bucket_name in self.s3_bucket_names:
+                s3_key = f"groups/{group_entity.group_name}.json"
                 try:
-                    s3_key = f"groups/{group_entity.group_name}.json"
+                
                     response = self.s3_client.get_object(Bucket=s3_bucket_name, Key=s3_key)
-                    group_data = json.loads(response['Body'].read().decode('utf-8'))
-
-                    # Reconstruct the key using SSS if shares are present
-                    if 'shares' in group_data and 'threshold' in group_data and 'prime_mod' in group_data:
-                        shares = group_data['shares']  # [(member_id, share_base64)]
-                        threshold = group_data['threshold']
-                        prime_mod = base64.b64decode(group_data['prime_mod'])
-
-                        # Decode shares from Base64
-                        decoded_shares = [(int(member_id), base64.b64decode(share_base64)) for member_id, share_base64 in shares]
-
-                        # Ensure we have at least the required number of shares
-                        if len(decoded_shares) < threshold:
-                            raise ValueError(f"Not enough shares to reconstruct the key for '{group_entity.group_name}'.")
-
-                        # Use SSS to reconstruct the group key
-                        reconstructed_key = shamir.recover_secret({
-                            "shares": decoded_shares[:threshold],
-                            "prime_mod": prime_mod,
-                            "required_shares": threshold
-                        })
-
-                        # Store the reconstructed key back in S3 for future use
-                        group_key_hex = reconstructed_key.hex()
-                        group_data['group_key'] = group_key_hex
-                        self.s3_client.put_object(
-                            Bucket=s3_bucket_name,
-                            Key=s3_key,
-                            Body=json.dumps(group_data),
-                            ContentType='application/json'
-                        )
-                        found = True
-                        return group_key_hex
-
-                    raise ValueError(f"Unable to retrieve or reconstruct the group key for '{group_entity.group_name}' in S3.")
                 except Exception as e:
-                    print(f"Failed to retrieve or reconstruct group key in S3: {e}")
-                    raise ValueError(f"Unable to retrieve or reconstruct the group key for '{group_entity.group_name}' in S3.")
+                    print(f"Failed to retrieve group data from S3: {e}")
+                    continue
+                
+                group_data = json.loads(response['Body'].read().decode('utf-8'))
+                
+                if group_data == None:
+                    print(f"No data found for group '{group_entity.group_name}' at {s3_bucket_name}/{s3_key}.")
+                    continue  # or raise an appropriate error
+                        
+
+                # Reconstruct the key using SSS if shares are present
+                if 'shares' in group_data and 'threshold' in group_data and 'prime_mod' in group_data:
+                    shares = group_data['shares']  # [(member_id, share_base64)]
+                    threshold = group_data['threshold']
+                    prime_mod = base64.b64decode(group_data['prime_mod'])
+
+                    # Decode shares from Base64
+                    decoded_shares = [(int(member_id), base64.b64decode(share_base64)) for member_id, share_base64 in shares]
+
+                    # Ensure we have at least the required number of shares
+                    if len(decoded_shares) < threshold:
+                        raise ValueError(f"Not enough shares to reconstruct the key for '{group_entity.group_name}'.")
+
+                    # Use SSS to reconstruct the group key
+                    reconstructed_key = shamir.recover_secret({
+                        "shares": decoded_shares[:threshold],
+                        "prime_mod": prime_mod,
+                        "required_shares": threshold
+                    })
+
+                    if reconstructed_key:
+                        found = True
+                        print(f"Reconstructed group key: {reconstructed_key.hex()}")
+                        return reconstructed_key.hex()
+                        
+
+                raise ValueError(f"Unable to retrieve or reconstruct the group key for '{group_entity.group_name}' in S3.")
+                
+        print("Not found in S3")                
                 
         if not found:
             # Do the same for Cosmos DB
             for cosmos_name in self.cosmos_names:
-                try:
-                    # Get the group data from Cosmos DB
-                    database = self.cosmos_client.get_database_client(cosmos_name)
-                    container = database.get_container_client(f"group_{sanitize_for_firebase_path(group_entity.group_name)}")
-                    group_data = container.read_item(item="metadata", partition_key="metadata")
+                # Get the group data from Cosmos DB
+                database = self.cosmos_client.get_database_client(cosmos_name)
+                container = database.get_container_client(f"group_{sanitize_for_firebase_path(group_entity.group_name)}")
+                group_data = container.read_item(item="metadata", partition_key="metadata")
+                
+                if group_data == None:
+                    print(f"No data found for group '{group_entity.group_name}' at Cosmos DB.")
+                    continue  # or raise an appropriate error
+                        
+                
+                if 'shares' in group_data and 'threshold' in group_data and 'prime_mod' in group_data:
+                    shares = group_data['shares']
+                    threshold = group_data['threshold']
+                    prime_mod = base64.b64decode(group_data['prime_mod'])
                     
-                    if 'shares' in group_data and 'threshold' in group_data and 'prime_mod' in group_data:
-                        shares = group_data['shares']
-                        threshold = group_data['threshold']
-                        prime_mod = base64.b64decode(group_data['prime_mod'])
-                        
-                        # Decode shares from Base64
-                        decoded_shares = [(int(member_id), base64.b64decode(share_base64)) for member_id, share_base64 in shares]
-                        
-                        if len(decoded_shares) < threshold:
-                            raise ValueError(f"Not enough shares to reconstruct the key for '{group_entity.group_name}' in Cosmos DB.")
-                        
-                        # Use SSS to reconstruct the group key
-                        reconstructed_key = shamir.recover_secret({
-                            "shares": decoded_shares[:threshold],
-                            "prime_mod": prime_mod,
-                            "required_shares": threshold
-                        })
-                        
-                        # Store the reconstructed key back in Cosmos DB for future use
-                        group_key_hex = reconstructed_key.hex()
-                        group_data['group_key'] = group_key_hex
-                        container.upsert_item(group_data)
+                    # Decode shares from Base64
+                    decoded_shares = [(int(member_id), base64.b64decode(share_base64)) for member_id, share_base64 in shares]
+                    
+                    if len(decoded_shares) < threshold:
+                        raise ValueError(f"Not enough shares to reconstruct the key for '{group_entity.group_name}' in Cosmos DB.")
+                    
+                    # Use SSS to reconstruct the group key
+                    reconstructed_key = shamir.recover_secret({
+                        "shares": decoded_shares[:threshold],
+                        "prime_mod": prime_mod,
+                        "required_shares": threshold
+                    })
+                    
+                    if reconstructed_key:
                         found = True
-                        return group_key_hex
+                        print(f"Reconstructed group key: {reconstructed_key.hex()}")
+                        return reconstructed_key.hex()
                     
-                    raise ValueError(f"Unable to retrieve or reconstruct the group key for '{group_entity.group_name}' in Cosmos DB.")
-                except Exception as e:
-                    print(f"Failed to retrieve or reconstruct group key in Cosmos DB: {e}")
-                    raise ValueError(f"Unable to retrieve or reconstruct the group key for '{group_entity.group_name}' in Cosmos DB.")
+                raise ValueError(f"Unable to retrieve or reconstruct the group key for '{group_entity.group_name}' in Cosmos DB.")
                 
         if not found:
             raise ValueError(f"Unable to retrieve or reconstruct the group key for '{group_entity.group_name}'.")
             
         return None
-   
 
     def save_topics(self):
         """
@@ -2163,7 +2178,7 @@ class P2PChatApp:
                                     sender = message_data.get('sender', '')
                                     if sender == f"{self.host}:{self.port}":
                                         sender = "You"
-                                    message = self.decrypt_group_message(entity, message_data)
+                                    message = self.decrypt_group_message(entity, message_data.get('message', ''))
                                     timestamp = message_data.get('timestamp', 0)  # Default to 0 if timestamp is missing
                                     display_message = f"{sender}: {message}" if sender else message
 
@@ -2179,7 +2194,6 @@ class P2PChatApp:
                 except Exception as e:
                     print(f"Error listing messages in S3 bucket '{bucket_name}' group folder: {e}")
 
-
             # Inside load_messages_from_cloud function
             # Add this block to process Cosmos DB messages
 
@@ -2190,44 +2204,48 @@ class P2PChatApp:
 
                     # Query all items in the container
                     query_result = container.query_items(
-                        query="SELECT * FROM c",  # Simple query to fetch all items
+                        query="SELECT * FROM c",  # Fetch all items in the container
                         enable_cross_partition_query=True  # Enable cross-partition query if needed
                     )
 
                     # Process each item
                     for item in query_result:
-                        # Skip metadata items (e.g., look for a distinguishing property like 'type')
-                        if item.get('type') == 'metadata' or item.get('id') in seen_message_ids:
+                        # Skip metadata items based on 'type'
+                        if item.get('id') == 'metadata':
                             continue
 
-                        seen_message_ids.add(item.get('id'))  # Mark as seen
-                        
-                        if item.get('type') != 'metadata' and item.get('id') not in seen_message_ids:
+                        # Skip already seen messages
+                        msg_id = item.get('id')
+                        if msg_id in seen_message_ids:
+                            continue
+                        seen_message_ids.add(msg_id)  # Mark as seen
 
-                            try:
-                                # Decrypt the message
-                                sender = item.get('sender', '')
-                                if sender == f"{self.host}:{self.port}":
-                                    sender = "You"
-                                message = self.decrypt_group_message(entity, item)
-                                timestamp = item.get('timestamp', 0)  # Default to 0 if missing
-                                display_message = f"{sender}: {message}" if sender else message
+                        try:
+                            # Decrypt the message
+                            print(f"Processing message item: {item}")
+                            sender = item.get('sender', '')
+                            if sender == f"{self.host}:{self.port}":
+                                sender = "You"
+                            message = self.decrypt_group_message(entity, item.get('message'))
+                            timestamp = item.get('timestamp', 0)  # Default to 0 if timestamp is missing
+                            display_message = f"{sender}: {message}" if sender else message
 
-                                # Add to the message objects for sorting
-                                message_objects.append({"message": display_message, "timestamp": timestamp})
-                            except Exception as e:
-                                print(f"Error decrypting Cosmos DB message: {e}")
-                                continue  # Skip to the next message
+                            # Add to the message objects for sorting
+                            message_objects.append({"message": display_message, "timestamp": timestamp})
+                        except Exception as e:
+                            print(f"Error decrypting Cosmos DB message (ID: {msg_id}): {e}")
+                            continue  # Skip to the next message
 
                 except Exception as e:
                     print(f"Error fetching messages from Cosmos DB database '{cosmos_name}': {e}")
+
 
         else: 
             
             local_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
             remote_id = f"{sanitize_for_firebase_path(entity.ip)}_{entity.port}"
             chat_id = f"{local_id}_{remote_id}"
-            chat_path = f"chats/{chat_id}.json"
+            chat_path = f"chats/{chat_id}/"
             
             for replica in self.firebase_refs:
                 chat_ref = db.reference(f"{replica}/chats/{chat_id}")
@@ -2256,83 +2274,79 @@ class P2PChatApp:
                         
            # AWS S3
             for bucket_name in self.s3_bucket_names:               
-            
                 
+                # List all objects in the chat directory
                 response = self.s3_client.list_objects_v2(Bucket=bucket_name, Prefix=chat_path)
                 
-                if 'Contents' not in response:  # If there are no objects with the given prefix
-                    print(f"No chats found for path '{chat_path}' in bucket '{bucket_name}'. Skipping.")
-                    continue   
-                response = self.s3_client.get_object(Bucket=bucket_name, Key=chat_path)
-                chat_data = json.loads(response['Body'].read().decode('utf-8')) or {}
+                if "Contents" not in response:
+                    print(f"No messages found for chat ID {chat_id} in S3 bucket {bucket_name}.")
+                    continue
 
-                if "messages" in chat_data:
-                    for message_data in chat_data["messages"]:
-                        msg_id = message_data.get('message_id')
-                        if msg_id in seen_message_ids:
-                            continue
-                        seen_message_ids.add(msg_id)  # Mark message as seen
+                for obj in response["Contents"]:
+                    message_key = obj["Key"]  # Path to the message file (e.g., chats/chat_id/message_id.json)
+                    if not message_key.endswith(".json"):
+                        continue  # Skip non-JSON files if any
 
-                        try:
-                            # Decrypt message
-                            sender = message_data.get('sender', '')
-                            encrypted_message_bytes = bytes.fromhex(message_data['message'])
-                            message = self.decrypt_message(encrypted_message_bytes, entity.aes_key)
-                            timestamp = message_data.get('timestamp', 0)  # Default to 0 if timestamp is missing
-                            display_message = f"{sender}: {message}" if sender else message
+                    # Fetch the message JSON
+                    response = self.s3_client.get_object(Bucket=bucket_name, Key=message_key)
+                    message_data = json.loads(response["Body"].read().decode("utf-8"))
 
-                            # Add to message objects with timestamp
-                            message_objects.append({"message": display_message, "timestamp": timestamp})
-                        except Exception as e:
-                            print(f"Error decrypting message: {e}")
-                            continue 
+                    # Check if the message is already processed
+                    msg_id = message_data.get("message_id")
+                    if msg_id in seen_message_ids:
+                        continue
+                    seen_message_ids.add(msg_id)  # Mark as seen
 
-            # Add this block to process Cosmos DB messages
+                    try:
+                        # Decrypt the message
+                        sender = message_data.get("sender", "")
+                        encrypted_message_bytes = bytes.fromhex(message_data["message"])
+                        message = self.decrypt_message(encrypted_message_bytes, entity.aes_key)
+                        timestamp = message_data.get("timestamp", 0)  # Default to 0 if timestamp is missing
+                        display_message = f"{sender}: {message}" if sender else message
+
+                        # Add the message to the message objects with timestamp for sorting
+                        message_objects.append({"message": display_message, "timestamp": timestamp})
+                    except Exception as e:
+                        print(f"Error decrypting message from {message_key}: {e}")
+                        continue  # Skip to the next message
+
+                    except Exception as e:
+                        print(f"Error fetching messages from S3 for peer {entity.ip}:{entity.port}: {e}")
+
             for cosmos_name in self.cosmos_names:
                 try:
-                    local_id = f"{sanitize_for_firebase_path(self.host)}_{self.port}"
-                    remote_id = f"{sanitize_for_firebase_path(entity.ip)}_{entity.port}"
-                    chat_id = f"{local_id}_{remote_id}"
-                               
-                    container_id = f"chat_{chat_id}"
-                    database_client = self.cosmos_client.get_database_client(cosmos_name)
-                        
-                    if container_id not in [container['id'] for container in database_client.list_containers()]:
-                        print(f"Container '{container_id}' does not exist in Cosmos DB. Skipping.")
-                        continue                    
-                              
-                    # Access the Cosmos DB container for the group
-                    container = database_client.get_container_client(container_id)
+                    # Access the Cosmos DB container for the user-to-user chat
+                    container = self.cosmos_client.get_database_client(cosmos_name).get_container_client(f"chat_{chat_id}")
 
                     # Query all items in the container
                     query_result = container.query_items(
-                        query="SELECT * FROM c",  # Simple query to fetch all items
+                        query="SELECT * FROM c",  # Fetch all items in the container
                         enable_cross_partition_query=True  # Enable cross-partition query if needed
                     )
 
                     # Process each item
                     for item in query_result:
-                        # Skip metadata items (e.g., look for a distinguishing property like 'type')
-                        if item.get('type') == 'metadata' or item.get('id') in seen_message_ids:
+
+                        # Skip already seen messages
+                        msg_id = item.get('id')
+                        if msg_id in seen_message_ids:
                             continue
+                        seen_message_ids.add(msg_id)  # Mark as seen
 
-                        seen_message_ids.add(item.get('id'))  # Mark as seen
-                        
-                        if item.get('type') != 'metadata' and item.get('id') not in seen_message_ids:
+                        try:
+                            # Decrypt the message
+                            sender = item.get("sender")
+                            encrypted_message_bytes = bytes.fromhex(item.get("message"))
+                            message = self.decrypt_message(encrypted_message_bytes, entity.aes_key)
+                            timestamp = item.get("timestamp", 0)  # Default to 0 if timestamp is missing
+                            display_message = f"{sender}: {message}" if sender else message
 
-                            try:
-                                # Decrypt message
-                                sender = message_data.get('sender', '')
-                                encrypted_message_bytes = bytes.fromhex(message_data['message'])
-                                message = self.decrypt_message(encrypted_message_bytes, entity.aes_key)
-                                timestamp = message_data.get('timestamp', 0)  # Default to 0 if timestamp is missing
-                                display_message = f"{sender}: {message}" if sender else message
-
-                                # Add to message objects with timestamp
-                                message_objects.append({"message": display_message, "timestamp": timestamp})
-                            except Exception as e:
-                                print(f"Error decrypting message: {e}")
-                                continue 
+                            # Add the message to the message objects with timestamp for sorting
+                            message_objects.append({"message": display_message, "timestamp": timestamp})
+                        except Exception as e:
+                            print(f"Error decrypting message from {message_key}: {e}")
+                            continue  # Skip to the next message
 
                 except Exception as e:
                     print(f"Error fetching messages from Cosmos DB database '{cosmos_name}': {e}")                                  
@@ -2404,13 +2418,6 @@ class P2PChatApp:
                     entity.messages.append({'sender': host_port, 'message': msg})
 
         #self.messages_loaded = True  # Set the flag to indicate messages are loaded
-
-    def load_ad_embeddings(self):
-        # Load ads from Firebase
-        ads_ref = db.reference(f"ads")
-        ads_data = ads_ref.get()
-        
-        return ads_data
 
     def get_recommendations(self):
         """
