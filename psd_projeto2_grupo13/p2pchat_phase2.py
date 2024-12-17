@@ -790,21 +790,6 @@ class P2PChatApp:
             # Do nothing here, as group connection is handled by the GUI
             pass
 
-        
-    def generate_prime_modulus(self):
-        # Example: generate a large prime modulus (this could be adjusted based on your requirements)
-        return sslib.util.select_prime_larger_than(100000)  # Choose an appropriate range for your use case
-    
-    def generate_group_key(self):
-        # Generate a random AES key (for encryption purposes)
-        return secrets.token_bytes(32)  # AES 256-bit key
-    
-    def encrypt_share(self, public_key, share):
-        # Encrypt share using public key
-        share_bytes = bytes(share)  # Convert the share to bytes
-        encrypted_share = public_key.encrypt(share_bytes, _Padding.OAEP(mgf=_Padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256()), label=None)
-        return encrypted_share    
-           
     def create_new_group(self):
         """
         Allows the user to create a new group with secret sharing attributes.
