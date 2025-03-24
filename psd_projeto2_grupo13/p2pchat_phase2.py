@@ -202,13 +202,10 @@ class P2PChatApp:
 
         # Initialize Firebase Admin SDK with credentials and database URL
         if not firebase_admin._apps:
-            #cred = credentials.Certificate("psdproject-6e38f-firebase-adminsdk-icq10-3708af2f3d.json")
             cred = credentials.Certificate("projetopsd-5a681-19d45fdfc118.json")
-            #cred = credentials.Certificate("projetopsd-6abec-firebase-adminsdk-tf6mp-1a2522b1cb.json")
             firebase_admin.initialize_app(cred, {
-                #'databaseURL': 'https://psdproject-6e38f-default-rtdb.europe-west1.firebasedatabase.app/'
                 'databaseURL': 'https://projetopsd-5a681-default-rtdb.europe-west1.firebasedatabase.app/'
-                #'databaseURL': 'https://projetopsd-6abec-default-rtdb.europe-west1.firebasedatabase.app/'
+
             })
 
             # Initialize AWS S3 client
@@ -216,16 +213,13 @@ class P2PChatApp:
                 's3',
                 # Uncomment and set your AWS credentials if needed
                 #aws_access_key_id='AKIAZI2LGQDRWWJFA5RX',
-                aws_access_key_id='AKIAQR5EPGH6RTK32M56',
-                #aws_access_key_id='AKIATG6MGI4GPA4WUFHM',
-                #aws_secret_access_key='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',
-                aws_secret_access_key='z4TCt1JyLPFeYoLEO/j7ei+550sMmuUdusoxPnSw',
-                #aws_secret_access_key='fyQscUkArOELwTDSDQ4Q6Wew+K++l1uDX1Ig3atX',
+                aws_access_key_id='',
+                aws_secret_access_key='',
                 region_name='us-east-1' #'us-east-1' 
             )  
             
         endpoint = "https://projetopsd.documents.azure.com:443/"
-        key = "8623mjb8FhTWVRLmgqeXaq5vLs5qZHuGXX4vSzm3WcXdf9DuHskbEbPpEgxoSY14HlRRMLffbvBeACDbiBWFMQ=="
+        key = ""
         
         client = CosmosClient(endpoint, key)
 
